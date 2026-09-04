@@ -54,7 +54,8 @@ press the new combination.
   commands (curate which with the `pluginCommands` setting)
 - *"Create a project called scratch and clone acme/widgets into it"* — hands
   multi-step work to Aide's own bb agent: a visible thread titled "Aide's
-  assistant" with a shell, git, and the bb CLI. It tells you when it's done,
+  assistant" in your **Personal** project (never inside the project you're
+  looking at), with a shell, git, and the bb CLI. It tells you when it's done,
   and follow-ups go to the same thread, so the agent keeps its context
 
 The agent always knows which thread and project you're looking at — even as
@@ -154,9 +155,9 @@ Voice tools: `get_context`, `list_projects`, `list_machines`,
 `list_live_threads`, `list_threads`, `search_threads`, `read_thread`,
 `focus_thread`, `set_pane`, `send_to_thread`, `start_thread`, `stop_thread`,
 `archive_thread`, `rename_thread`, `show_diff`, `update_instructions`,
-`run_plugin_command`, `delegate` (hands a task to Aide's own bb agent thread;
-completion arrives via the thread.idle announcement), plus frontend-local
-`set_composer_text` / `append_composer_text`.
+`run_plugin_command`, `delegate` (hands a task to Aide's own bb agent thread in
+the Personal project; completion arrives via the thread.idle announcement),
+plus frontend-local `set_composer_text` / `append_composer_text`.
 
 Dev loop:
 

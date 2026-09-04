@@ -344,7 +344,7 @@ export function BehaviorSettings() {
 
       <Group
         label="Delegation"
-        hint={`Lets Aide hand multi-step work to a bb agent of its own: a visible thread titled "Aide's assistant" with a shell, git, and the bb CLI. Off, Aide is limited to its direct tools.`}
+        hint={`Lets Aide hand multi-step work to a bb agent of its own: a visible thread titled "Aide's assistant" in your Personal project, with a shell, git, and the bb CLI. Off, Aide is limited to its direct tools.`}
       >
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground">Delegate tasks to a bb agent</span>

@@ -378,12 +378,12 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delega
           type: "function",
           name: "delegate",
           description:
-            "Hand a task to your own bb agent, which has a shell, git, and the full bb CLI — so it can do anything bb can: create projects, clone repositories, run commands, investigate code across threads. It works in the background in a visible thread titled \"Aide's assistant\"; you are told when it finishes. Use it for anything the direct tools cannot do, or that needs several steps. Do NOT use it for navigation or a single lookup — those have instant tools.",
+            "Hand a task to your own bb agent, which has a shell, git, and the full bb CLI — so it can do anything bb can: create projects, clone repositories, run commands, investigate code across threads. It works in the background in a visible thread titled \"Aide's assistant\" in the user's Personal project (never inside the project in view); you are told when it finishes. Use it for anything the direct tools cannot do, or that needs several steps. Do NOT use it for navigation or a single lookup — those have instant tools.",
           parameters: {
             type: "object",
             properties: {
               task: { type: "string", description: "The user's request, verbatim where possible, in one or two sentences." },
-              project_id: { type: "string", description: "Project to work in; defaults to the user's current project." },
+              project_id: { type: "string", description: "The project the task is about, passed to the agent as context; defaults to the user's current project. The agent itself always runs in the Personal project." },
             },
             required: ["task"],
           },
@@ -450,21 +450,28 @@ Rules:
 - When the user asks you to permanently behave differently ("always …", "from now on …"), use update_instructions to amend these standing instructions.`;
 
 const ASSISTANT_TITLE = "Aide's assistant";
+/** kv key holding the id of the one global assistant thread. */
+const ASSISTANT_KEY = "assistant.global";
+/** bb's built-in project-less area; every user has exactly one. */
+const PERSONAL_PROJECT_ID = "proj_personal";
 
 /**
- * Opening brief for Aide's own bb agent: one long-lived, visible thread per
- * project that delegated tasks are sent to. It has a shell, git, and the bb
- * CLI, so "anything bb can do" is a sentence to it; its completion reaches the
- * voice session through the ordinary thread.idle announcement.
+ * Opening brief for Aide's own bb agent: one long-lived, visible thread in the
+ * user's Personal project that every delegated task is sent to — a global
+ * helper area, deliberately outside whichever project the user is looking at.
+ * It has a shell, git, and the bb CLI, so "anything bb can do" is a sentence
+ * to it; its completion reaches the voice session through the ordinary
+ * thread.idle announcement.
  */
 const ASSISTANT_BRIEF = `You are the background agent for Aide, a voice assistant that drives bb (the user's agentic IDE) hands-free. Aide relays the user's spoken requests to you as tasks; the user only hears a spoken summary of what you did.
 
 - You have a shell, git, and the bb CLI (run it as "$BB_CLI"; "bb guide" explains it). Anything bb can do — create or list projects, clone repositories, inspect threads, run commands — you can do.
+- You live in the user's Personal project, outside any repository. Each task names the project the user was looking at; act on a project through bb (bb project show for its path, bb thread spawn to put an agent to work in it) or by changing into its checkout — never assume your current directory is the project.
 - Nobody can answer questions mid-task. If a request is ambiguous, do the safest reasonable thing and say what you assumed. Never take destructive or irreversible actions (deleting projects or threads, force-pushing, discarding work) unless the task says so explicitly.
 - Finish every task with a plain-language summary of one or two sentences that will be read aloud: no code, paths, or ids. Follow-up tasks arrive in this same thread, so refer back to earlier work when relevant.`;
 
 /** Appended to the voice session's instructions while delegation is enabled. */
-const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}", and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
+const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -581,6 +588,18 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`config migration skipped: ${error instanceof Error ? error.message : String(error)}`);
     }
     await bb.storage.kv.set("config.migrated", true);
+  }
+
+  // One-time migration: the first delegate build kept one assistant thread
+  // per project (kv "assistant.<projectId>") inside that project. The
+  // assistant now lives in the Personal project under one global key, so the
+  // old pointers are dropped; the threads they named are left alone for the
+  // user to archive.
+  if (!(await bb.storage.kv.get<boolean>("assistant.migrated"))) {
+    for (const key of await bb.storage.kv.list("assistant.")) {
+      if (key !== ASSISTANT_KEY && key !== "assistant.migrated") await bb.storage.kv.delete(key);
+    }
+    await bb.storage.kv.set("assistant.migrated", true);
   }
 
   // ---- plugin-command exposure ----
@@ -1050,16 +1069,29 @@ export default async function plugin(bb: BbPluginApi) {
         return truncate(out || "(no output)");
       }
       case "delegate": {
-        // Aide's own bb agent: one long-lived, visible thread per project. Its
+        // Aide's own bb agent: one long-lived, visible thread in the Personal
+        // project — a global helper area, never the project in view. Its
         // completion reaches the voice session through the same thread.idle
         // announcement path as any other thread, so nothing here waits.
         const { delegate } = await readConfig();
         if (!delegate) return "Delegation is turned off in Handsfree settings (Behavior → Delegation). Tell the user.";
-        const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : context.projectId;
-        if (!projectId) return "Error: no project_id given and no current project. Ask the user or call list_projects.";
         const task = str("task");
-        const key = `assistant.${projectId}`;
-        let threadId = (await bb.storage.kv.get<string>(key)) ?? null;
+        // The project the task is about travels with it as context; the
+        // assistant is not in that project and must reach it through bb.
+        const aboutProjectId =
+          typeof args.project_id === "string" && args.project_id ? args.project_id : context.projectId;
+        const contextParts: string[] = [];
+        if (aboutProjectId) {
+          const projects = await bb.sdk.projects.list({ includePersonal: true }).catch(() => []);
+          const project = projects.find((p) => p.id === aboutProjectId);
+          contextParts.push(`the user is in project ${project ? `"${project.name}" (${project.id})` : aboutProjectId}`);
+        } else {
+          contextParts.push("the user has no project in view");
+        }
+        if (context.threadId) contextParts.push(`viewing thread ${context.threadId}`);
+        const message = `Task: ${task}\nContext: ${contextParts.join(", ")}.`;
+
+        let threadId = (await bb.storage.kv.get<string>(ASSISTANT_KEY)) ?? null;
         if (threadId) {
           // Reuse only while it is still around; archived or deleted means start fresh.
           const existing = await bb.sdk.threads.get({ threadId }).catch(() => null);
@@ -1069,17 +1101,19 @@ export default async function plugin(bb: BbPluginApi) {
           await bb.sdk.threads.send({
             threadId,
             mode: "auto",
-            input: [{ type: "text", text: task, mentions: [] }],
+            input: [{ type: "text", text: message, mentions: [] }],
           });
         } else {
           const thread = await bb.sdk.threads.spawn({
-            projectId,
-            environment: { type: "project-default" },
+            projectId: PERSONAL_PROJECT_ID,
+            // Personal-project threads must run in a personal workspace; with no
+            // hostId bb picks the connected primary machine.
+            environment: { type: "host", workspace: { type: "personal" } },
             title: ASSISTANT_TITLE,
-            prompt: `${ASSISTANT_BRIEF}\n\nTask: ${task}`,
+            prompt: `${ASSISTANT_BRIEF}\n\n${message}`,
           });
           threadId = thread.id;
-          await bb.storage.kv.set(key, threadId);
+          await bb.storage.kv.set(ASSISTANT_KEY, threadId);
         }
         // Deliberately no threads.open: delegating must never yank the user's
         // screen or background a live mobile call.
@@ -1087,7 +1121,8 @@ export default async function plugin(bb: BbPluginApi) {
           delegated: true,
           threadId,
           title: ASSISTANT_TITLE,
-          note: "Working in the background; its completion will be announced like any thread update. Tell the user in one short sentence that it's on it — do not wait or poll.",
+          project: "Personal",
+          note: "Working in the background in your Personal project; its completion will be announced like any thread update. Tell the user in one short sentence that it's on it — do not wait or poll.",
         });
       }
       case "update_instructions": {
