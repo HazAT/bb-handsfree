@@ -18,8 +18,8 @@ import {
   isVoice,
   type RealtimeModel,
   type Voice,
-} from "./models";
-import { DEFAULT_SHORTCUTS, isValidShortcut, normalizeShortcuts, type Shortcuts } from "./shortcuts";
+} from "./models.ts";
+import { DEFAULT_SHORTCUTS, isValidShortcut, normalizeShortcuts, type Shortcuts } from "./shortcuts.ts";
 
 /**
  * Rebindable keyboard shortcuts (see shortcuts.ts): each value is a
@@ -121,6 +121,7 @@ export const rpcContract = defineRpcContract({
         voice: z.enum(VOICE_OPTIONS),
         notifications: z.boolean(),
         pluginCommands: z.string(),
+        delegate: z.boolean(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]),
         shortcuts: shortcutsSchema,
       })
@@ -134,6 +135,7 @@ export const rpcContract = defineRpcContract({
         voice: z.enum(VOICE_OPTIONS).optional(),
         notifications: z.boolean().optional(),
         pluginCommands: z.string().max(2000).optional(),
+        delegate: z.boolean().optional(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]).optional(),
         shortcuts: shortcutsSchema.optional(),
       })
@@ -144,6 +146,7 @@ export const rpcContract = defineRpcContract({
         voice: z.enum(VOICE_OPTIONS),
         notifications: z.boolean(),
         pluginCommands: z.string(),
+        delegate: z.boolean(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]),
         shortcuts: shortcutsSchema,
       })
@@ -368,7 +371,25 @@ interface PluginCommandInfo {
   summary: string;
 }
 
-function toolSchemas(pluginCommands: PluginCommandInfo[] = []) {
+function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delegate?: boolean } = {}) {
+  const delegateTool = options.delegate
+    ? [
+        {
+          type: "function",
+          name: "delegate",
+          description:
+            "Hand a task to your own bb agent, which has a shell, git, and the full bb CLI — so it can do anything bb can: create projects, clone repositories, run commands, investigate code across threads. It works in the background in a visible thread titled \"Aide's assistant\"; you are told when it finishes. Use it for anything the direct tools cannot do, or that needs several steps. Do NOT use it for navigation or a single lookup — those have instant tools.",
+          parameters: {
+            type: "object",
+            properties: {
+              task: { type: "string", description: "The user's request, verbatim where possible, in one or two sentences." },
+              project_id: { type: "string", description: "Project to work in; defaults to the user's current project." },
+            },
+            required: ["task"],
+          },
+        },
+      ]
+    : [];
   const pluginTool =
     pluginCommands.length === 0
       ? []
@@ -405,6 +426,7 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = []) {
     { type: "function", name: "rename_thread", description: "Rename a thread.", parameters: { type: "object", properties: { thread_id: { type: "string" }, title: { type: "string" } }, required: ["thread_id", "title"] } },
     { type: "function", name: "show_diff", description: "Summarize a thread's workspace diff (changed files, additions/deletions) and focus the thread so the user can see it.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "update_instructions", description: "Amend your own standing instructions (the system prompt for future voice sessions). Pass the COMPLETE new instructions text, not a diff. Use only when the user asks for a lasting behavior change.", parameters: { type: "object", properties: { instructions: { type: "string", description: "The full replacement instructions." }, reason: { type: "string", description: "One short sentence: why, quoting the user's request." } }, required: ["instructions", "reason"] } },
+    ...delegateTool,
     // Handled locally in the bb app frontend, never reaches runTool:
     { type: "function", name: "set_composer_text", description: "Replace the text in the user's message composer (the box they type prompts into).", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { type: "function", name: "append_composer_text", description: "Append text to the user's message composer.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
@@ -413,17 +435,36 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = []) {
 
 const DEFAULT_PROMPT = `You are Aide, a concise voice operator for bb — the user's agentic IDE where coding agents run in threads inside projects.
 
-The user talks to you to drive bb hands-free. You can list/search/read threads, focus them on screen, spotlight or maximize panes, send messages to agent threads, start new threads, stop or archive threads, summarize diffs, and edit the user's prompt composer.
+You are an orchestrator, not a worker: the coding agents in the threads do the work; you route the user's words to them and navigate the workspace. You can list/search/read threads, focus them on screen, spotlight or maximize panes, send messages to agent threads, start new threads, stop or archive threads, summarize diffs, and edit the user's prompt composer.
 
 Rules:
+- Default to relaying. When the user is in a thread (get_context shows one), anything they say about the work goes to that thread's agent with send_to_thread, in their own words: instructions, answers, corrections, "continue", "also do X", questions about the code. Do not answer or act on it yourself, and do not ask clarifying questions — if something is unclear, the thread's agent will ask. Confirm in one word ("Sent."). Handle it yourself only when it is clearly aimed at you or the workspace: navigating (focus, spotlight, list, search, switch), reading results aloud ("what did it say?"), stopping, archiving or renaming, starting a new thread, or work outside the current thread.
+- With no thread in view, route work to your own agent (delegate, when available) or start a thread; never do the work yourself.
 - Be extremely succinct. One short sentence by default ("Done.", "Focused.", "Sent."). Never narrate what you're about to do, never enumerate options, never restate the user's request. Add detail only when asked.
 - Thread ids look like thr_x… and project ids like proj_x…. When the user names a thread by topic or title, find it with list_threads or search_threads first.
-- Never invent prompts, titles, or messages on the user's behalf. If required information is missing, ask one short question.
+- Never invent prompts, titles, or messages on the user's behalf: relay the user's own words. Ask a question only when you cannot act at all without the answer (for example, no thread or project in view and none named).
 - When reading agent output aloud, give a one-or-two-sentence summary; never read code or ids verbatim.
 - Prefer focus_thread so the user sees what you are talking about.
 - While a voice session is active, bb sends you updates when visible threads finish or fail (when Announcements is enabled). You can notify the user: if they ask to be told when a thread finishes, say yes, then announce the update in one short sentence when it arrives. Always name the thread by its title in that sentence; several threads may be running, so a bare "it finished" is ambiguous. Never claim that you cannot notify them, and do not poll the thread.
 - Threads run on a machine. start_thread uses the project's default machine unless you pass machine_id — when the project is on several connected machines and the user didn't name one, use list_machines and ask one short question (e.g. "On your MacBook or the studio?") before starting.
 - When the user asks you to permanently behave differently ("always …", "from now on …"), use update_instructions to amend these standing instructions.`;
+
+const ASSISTANT_TITLE = "Aide's assistant";
+
+/**
+ * Opening brief for Aide's own bb agent: one long-lived, visible thread per
+ * project that delegated tasks are sent to. It has a shell, git, and the bb
+ * CLI, so "anything bb can do" is a sentence to it; its completion reaches the
+ * voice session through the ordinary thread.idle announcement.
+ */
+const ASSISTANT_BRIEF = `You are the background agent for Aide, a voice assistant that drives bb (the user's agentic IDE) hands-free. Aide relays the user's spoken requests to you as tasks; the user only hears a spoken summary of what you did.
+
+- You have a shell, git, and the bb CLI (run it as "$BB_CLI"; "bb guide" explains it). Anything bb can do — create or list projects, clone repositories, inspect threads, run commands — you can do.
+- Nobody can answer questions mid-task. If a request is ambiguous, do the safest reasonable thing and say what you assumed. Never take destructive or irreversible actions (deleting projects or threads, force-pushing, discarding work) unless the task says so explicitly.
+- Finish every task with a plain-language summary of one or two sentences that will be read aloud: no code, paths, or ids. Follow-up tasks arrive in this same thread, so refer back to earlier work when relevant.`;
+
+/** Appended to the voice session's instructions while delegation is enabled. */
+const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}", and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -484,6 +525,8 @@ export default async function plugin(bb: BbPluginApi) {
     voice: Voice;
     notifications: boolean;
     pluginCommands: string;
+    /** Whether the delegate tool (Aide's own bb agent) is offered. */
+    delegate: boolean;
     credentialPreference: CredentialPreference;
     shortcuts: Shortcuts;
   }
@@ -493,6 +536,7 @@ export default async function plugin(bb: BbPluginApi) {
     voice: DEFAULT_VOICE,
     notifications: true,
     pluginCommands: "all",
+    delegate: true,
     credentialPreference: "auto",
     shortcuts: { ...DEFAULT_SHORTCUTS },
   };
@@ -505,6 +549,7 @@ export default async function plugin(bb: BbPluginApi) {
         typeof stored.notifications === "boolean" ? stored.notifications : CONFIG_DEFAULTS.notifications,
       pluginCommands:
         typeof stored.pluginCommands === "string" ? stored.pluginCommands : CONFIG_DEFAULTS.pluginCommands,
+      delegate: typeof stored.delegate === "boolean" ? stored.delegate : CONFIG_DEFAULTS.delegate,
       credentialPreference: isCredentialPreference(stored.credentialPreference)
         ? stored.credentialPreference
         : CONFIG_DEFAULTS.credentialPreference,
@@ -1004,6 +1049,47 @@ export default async function plugin(bb: BbPluginApi) {
         }
         return truncate(out || "(no output)");
       }
+      case "delegate": {
+        // Aide's own bb agent: one long-lived, visible thread per project. Its
+        // completion reaches the voice session through the same thread.idle
+        // announcement path as any other thread, so nothing here waits.
+        const { delegate } = await readConfig();
+        if (!delegate) return "Delegation is turned off in Handsfree settings (Behavior → Delegation). Tell the user.";
+        const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : context.projectId;
+        if (!projectId) return "Error: no project_id given and no current project. Ask the user or call list_projects.";
+        const task = str("task");
+        const key = `assistant.${projectId}`;
+        let threadId = (await bb.storage.kv.get<string>(key)) ?? null;
+        if (threadId) {
+          // Reuse only while it is still around; archived or deleted means start fresh.
+          const existing = await bb.sdk.threads.get({ threadId }).catch(() => null);
+          if (!existing || existing.archivedAt || existing.deletedAt) threadId = null;
+        }
+        if (threadId) {
+          await bb.sdk.threads.send({
+            threadId,
+            mode: "auto",
+            input: [{ type: "text", text: task, mentions: [] }],
+          });
+        } else {
+          const thread = await bb.sdk.threads.spawn({
+            projectId,
+            environment: { type: "project-default" },
+            title: ASSISTANT_TITLE,
+            prompt: `${ASSISTANT_BRIEF}\n\nTask: ${task}`,
+          });
+          threadId = thread.id;
+          await bb.storage.kv.set(key, threadId);
+        }
+        // Deliberately no threads.open: delegating must never yank the user's
+        // screen or background a live mobile call.
+        return JSON.stringify({
+          delegated: true,
+          threadId,
+          title: ASSISTANT_TITLE,
+          note: "Working in the background; its completion will be announced like any thread update. Tell the user in one short sentence that it's on it — do not wait or poll.",
+        });
+      }
       case "update_instructions": {
         const content = str("instructions");
         if (content.length > 20000) return "Error: instructions too long (max 20000 characters).";
@@ -1138,16 +1224,17 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     async createCall({ sdp, threadId, projectId, onNewThreadScreen, nonce }) {
       const key = await apiKey();
-      const { model, voice } = await readConfig();
+      const { model, voice, delegate } = await readConfig();
       const pluginCommands = await exposedPluginCommands();
       const pluginSection =
         pluginCommands.length === 0
           ? ""
           : `\n\nInstalled bb plugins contribute extra commands you can run with run_plugin_command:\n${pluginCommands.map((c) => `- ${c.id}: bb ${c.name} — ${c.summary}`).join("\n")}\nWhen unsure of a plugin's subcommands, run it with argv ["--help"] first. Summarize command output aloud in a sentence or two; never read raw JSON or long output verbatim.`;
+      const delegateSection = delegate ? DELEGATE_PROMPT_SECTION : "";
       const session = {
         type: "realtime",
         model,
-        instructions: `${activePrompt()}${pluginSection}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
+        instructions: `${activePrompt()}${pluginSection}${delegateSection}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
         audio: {
           input: {
             noise_reduction: { type: "near_field" },
@@ -1164,7 +1251,7 @@ export default async function plugin(bb: BbPluginApi) {
           },
           output: { voice },
         },
-        tools: toolSchemas(pluginCommands),
+        tools: toolSchemas(pluginCommands, { delegate }),
       };
       const form = new FormData();
       form.set("sdp", sdp);
@@ -1187,8 +1274,9 @@ export default async function plugin(bb: BbPluginApi) {
     async getTools() {
       const local = new Set(["set_composer_text", "append_composer_text"]);
       const pluginCommands = await exposedPluginCommands();
+      const { delegate } = await readConfig();
       return {
-        tools: toolSchemas(pluginCommands).map((tool) => ({
+        tools: toolSchemas(pluginCommands, { delegate }).map((tool) => ({
           name: tool.name,
           description: tool.description ?? "",
           parameters: "parameters" in tool && tool.parameters ? JSON.stringify(tool.parameters) : null,

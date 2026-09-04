@@ -278,6 +278,7 @@ const ACTIONS: Record<string, { family: ActionFamily; verb: string }> = {
   set_composer_text: { family: "compose", verb: "Drafted a message" },
   append_composer_text: { family: "compose", verb: "Appended to the draft" },
   run_plugin_command: { family: "plugin", verb: "Ran a plugin command" },
+  delegate: { family: "mutate", verb: "Delegated to its agent" },
 };
 
 function actionMeta(name: string): { family: ActionFamily; verb: string } {

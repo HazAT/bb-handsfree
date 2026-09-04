@@ -54,6 +54,7 @@ interface VoiceConfig {
   voice: Voice;
   notifications: boolean;
   pluginCommands: string;
+  delegate: boolean;
   credentialPreference: CredentialPreference;
   shortcuts: Shortcuts;
 }
@@ -310,6 +311,7 @@ export function BehaviorSettings() {
   const { config, update } = useVoiceConfig();
   const loading = config === null;
   const notifications = config?.notifications ?? true;
+  const delegate = config?.delegate ?? true;
   const pluginCommands = (config?.pluginCommands ?? "all").trim();
 
   const exposure: "all" | "none" | "custom" =
@@ -335,6 +337,22 @@ export function BehaviorSettings() {
             checked={notifications}
             disabled={loading}
             onChange={(event) => void update({ notifications: event.target.checked })}
+            className="size-4 shrink-0 accent-primary"
+          />
+        </label>
+      </Group>
+
+      <Group
+        label="Delegation"
+        hint={`Lets Aide hand multi-step work to a bb agent of its own: a visible thread titled "Aide's assistant" with a shell, git, and the bb CLI. Off, Aide is limited to its direct tools.`}
+      >
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground">Delegate tasks to a bb agent</span>
+          <input
+            type="checkbox"
+            checked={delegate}
+            disabled={loading}
+            onChange={(event) => void update({ delegate: event.target.checked })}
             className="size-4 shrink-0 accent-primary"
           />
         </label>

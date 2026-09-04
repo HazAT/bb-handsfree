@@ -52,6 +52,10 @@ press the new combination.
   your composer so you can review and hit send yourself
 - *"What automations do I have?"* — runs other installed plugins' `bb`
   commands (curate which with the `pluginCommands` setting)
+- *"Create a project called scratch and clone acme/widgets into it"* — hands
+  multi-step work to Aide's own bb agent: a visible thread titled "Aide's
+  assistant" with a shell, git, and the bb CLI. It tells you when it's done,
+  and follow-ups go to the same thread, so the agent keeps its context
 
 The agent always knows which thread and project you're looking at — even as
 you navigate mid-conversation — so "this thread" just works. If a project
@@ -84,8 +88,9 @@ Open the Handsfree plugin settings for curated sections:
 - **Models & voice** — the OpenAI Realtime model, the assistant voice (marin
   and cedar are the highest-quality options), and a badge showing which
   credential Aide will use.
-- **Behavior** — whether Aide announces thread events, and which installed
-  plugins' `bb` commands it may run (all / none / a specific list).
+- **Behavior** — whether Aide announces thread events, whether it may
+  delegate work to a bb agent of its own, and which installed plugins' `bb`
+  commands it may run (all / none / a specific list).
 - **Audio** — pick and test the microphone with a live input-level meter. The
   chosen mic is stored in the current browser and applies to the next voice
   session; if it disconnects, Handsfree falls back to the system default.
@@ -149,8 +154,9 @@ Voice tools: `get_context`, `list_projects`, `list_machines`,
 `list_live_threads`, `list_threads`, `search_threads`, `read_thread`,
 `focus_thread`, `set_pane`, `send_to_thread`, `start_thread`, `stop_thread`,
 `archive_thread`, `rename_thread`, `show_diff`, `update_instructions`,
-`run_plugin_cli`, plus frontend-local `set_composer_text` /
-`append_composer_text`.
+`run_plugin_command`, `delegate` (hands a task to Aide's own bb agent thread;
+completion arrives via the thread.idle announcement), plus frontend-local
+`set_composer_text` / `append_composer_text`.
 
 Dev loop:
 
