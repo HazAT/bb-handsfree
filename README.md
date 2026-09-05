@@ -94,6 +94,7 @@ bb handsfree live            # who's running right now
 bb handsfree live --json     # machine-readable
 bb handsfree read thr_xxxxx  # a thread's status + latest assistant output
 bb handsfree usage           # what your voice sessions cost, per day (estimated)
+bb handsfree tools           # tool calls, errors, median latency, and p90 latency
 bb handsfree stop            # stop an active voice session in any bb window
 ```
 

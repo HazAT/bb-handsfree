@@ -219,6 +219,79 @@ test("Omarchy tools and Omar's desktop brief are included only while the setting
   }
 });
 
+test("runTool records successful calls and classifies bad arguments and unknown tools", async () => {
+  const { host } = await load();
+  await host.harness.callRpc("setConfig", { omarchyTools: true });
+
+  await host.harness.callRpc("runTool", {
+    name: "get_context",
+    args: {},
+    ...CONTEXT,
+    sessionId: "call-telemetry",
+  });
+  const invalid = (await host.harness.callRpc("runTool", {
+    name: "omarchy_theme",
+    args: { action: "invalid" },
+    ...CONTEXT,
+    sessionId: "call-telemetry",
+  })) as { output: string };
+  assert.match(invalid.output, /^Tool error: Invalid arguments:/);
+  const unknown = (await host.harness.callRpc("runTool", {
+    name: "not_a_tool",
+    args: {},
+    ...CONTEXT,
+    sessionId: "call-telemetry",
+  })) as { output: string };
+  assert.equal(unknown.output, "Tool error: Unknown tool: not_a_tool");
+
+  const rows = host.bb.storage
+    .database()
+    .prepare("SELECT session_id, tool, ok, error FROM tool_events ORDER BY rowid")
+    .all() as { session_id: string; tool: string; ok: number; error: string | null }[];
+  assert.deepEqual(rows, [
+    { session_id: "call-telemetry", tool: "get_context", ok: 1, error: null },
+    { session_id: "call-telemetry", tool: "omarchy_theme", ok: 0, error: "bad_args" },
+    { session_id: "call-telemetry", tool: "not_a_tool", ok: 0, error: "unknown_tool" },
+  ]);
+});
+
+test("tools CLI aggregates calls, error rates, median, p90, and error classes", async () => {
+  const { host } = await load();
+  const insert = host.bb.storage
+    .database()
+    .prepare("INSERT INTO tool_events (session_id, tool, ok, ms, error, at) VALUES (?, ?, ?, ?, ?, ?)");
+  const now = Date.now();
+  for (const [tool, ok, ms, error] of [
+    ["alpha", 1, 10, null],
+    ["alpha", 1, 20, null],
+    ["alpha", 0, 30, "bad_args"],
+    ["alpha", 1, 40, null],
+    ["alpha", 1, 50, null],
+    ["beta", 0, 100, "denied"],
+    ["beta", 1, 200, null],
+    ["beta", 0, 300, "denied"],
+  ] as const) {
+    insert.run("seed-session", tool, ok, ms, error, now);
+  }
+  insert.run("old-session", "ignored", 0, 999, "timeout", now - 8 * 86_400_000);
+
+  const result = await host.harness.runCli(["tools", "--days", "7", "--json"]);
+  assert.equal(result.exitCode, 0);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report, {
+    days: 7,
+    tools: [
+      { tool: "alpha", calls: 5, errors: 1, errorRatePct: 20, medianMs: 30, p90Ms: 50 },
+      { tool: "beta", calls: 3, errors: 2, errorRatePct: 66.67, medianMs: 200, p90Ms: 300 },
+    ],
+    totals: { calls: 8, errors: 3, errorRatePct: 37.5, medianMs: 45, p90Ms: 300 },
+    topErrorClasses: [
+      { error: "denied", calls: 2 },
+      { error: "bad_args", calls: 1 },
+    ],
+  });
+});
+
 test("createSpeakCall sends the read-aloud session shape and returns the answer SDP", async () => {
   const { host } = await load();
   await host.harness.callRpc("setConfig", { voice: "cedar" });

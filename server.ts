@@ -24,6 +24,7 @@ import {
 import { DEFAULT_SHORTCUTS, isValidShortcut, normalizeShortcuts, type Shortcuts } from "./shortcuts.ts";
 import {
   OMARCHY_TOOL_SCHEMAS,
+  OmarchyToolError,
   omarchyAvailable,
   runOmarchyTool,
   type OmarchyToolDeps,
@@ -323,6 +324,7 @@ export const rpcContract = defineRpcContract({
         threadId: z.string().nullable(),
         projectId: z.string().nullable(),
         onNewThreadScreen: z.boolean().optional(),
+        sessionId: z.string().min(1).optional(),
       })
       .strict(),
     output: z.object({ output: z.string() }).strict(),
@@ -350,6 +352,49 @@ interface UsageRow {
   cached_audio: number;
   output_text: number;
   output_audio: number;
+}
+
+interface ToolEventRow {
+  tool: string;
+  ok: number;
+  ms: number;
+  error: string | null;
+}
+
+type ToolErrorClass = "unknown_tool" | "bad_args" | "denied" | "timeout" | "exec_failed" | "other";
+
+class ToolRunError extends Error {
+  readonly errorClass: ToolErrorClass;
+
+  constructor(errorClass: ToolErrorClass, message: string) {
+    super(message);
+    this.errorClass = errorClass;
+  }
+}
+
+function classifyToolError(error: unknown): ToolErrorClass {
+  if (error instanceof OmarchyToolError) return error.code;
+  if (error instanceof ToolRunError) return error.errorClass;
+  if (error && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (code === "ETIMEDOUT" || code === "ABORT_ERR") return "timeout";
+    if (code === "EACCES" || code === "EPERM") return "denied";
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b(?:timed?\s*out|timeout)\b/i.test(message)) return "timeout";
+  if (/\b(?:access|permission) denied\b|\bforbidden\b/i.test(message)) return "denied";
+  return "other";
+}
+
+function median(sorted: number[]): number | null {
+  if (sorted.length === 0) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
+}
+
+function nearestRank(sorted: number[], percentile: number): number | null {
+  if (sorted.length === 0) return null;
+  return sorted[Math.ceil(percentile * sorted.length) - 1];
 }
 
 /** Estimated USD cost of one usage row at current RATES. */
@@ -526,6 +571,14 @@ export default async function plugin(bb: BbPluginApi) {
       source TEXT NOT NULL,
       note TEXT,
       content TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS tool_events (
+      session_id TEXT,
+      tool TEXT NOT NULL,
+      ok INTEGER NOT NULL,
+      ms INTEGER NOT NULL,
+      error TEXT,
+      at INTEGER NOT NULL
     )`,
   ]);
 
@@ -929,13 +982,16 @@ export default async function plugin(bb: BbPluginApi) {
     context: { threadId: string | null; projectId: string | null; onNewThreadScreen?: boolean },
   ): Promise<string> {
     if (name === "read_config_file" || name.startsWith("omarchy_") || name.startsWith("hyprland_")) {
+      if (!OMARCHY_TOOL_SCHEMAS.some((tool) => tool.name === name)) {
+        throw new ToolRunError("unknown_tool", `Unknown tool: ${name}`);
+      }
       const { omarchyTools } = await readConfig();
       if (!omarchyTools) return "Omarchy tools are turned off in Handsfree settings (Behavior → Omarchy tools).";
       return runOmarchyTool(name, args, omarchyDeps);
     }
     const str = (key: string): string => {
       const value = args[key];
-      if (typeof value !== "string" || !value) throw new Error(`Missing argument: ${key}`);
+      if (typeof value !== "string" || !value) throw new ToolRunError("bad_args", `Missing argument: ${key}`);
       return value;
     };
     switch (name) {
@@ -1200,7 +1256,7 @@ export default async function plugin(bb: BbPluginApi) {
         return JSON.stringify({ shortstat: diff.shortstat, files: files.slice(0, 50) });
       }
       default:
-        return `Unknown tool: ${name}`;
+        throw new ToolRunError("unknown_tool", `Unknown tool: ${name}`);
     }
   }
 
@@ -1211,6 +1267,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "live", summary: "List live threads: running now plus recently finished (last 30 min), like the sidebar. Add --json for machine output.", usage: "bb handsfree live [--json]" },
       { name: "read", summary: "Read a thread's status and latest assistant output.", usage: "bb handsfree read <thread-id>" },
       { name: "usage", summary: "Voice-session token usage and estimated cost, grouped per day. Add --json for machine output, --days N to limit the window.", usage: "bb handsfree usage [--days N] [--json]" },
+      { name: "tools", summary: "Tool calls, errors, and latency. Add --json for machine output, --days N to limit the window.", usage: "bb handsfree tools [--days N] [--json]" },
       { name: "stop", summary: "Stop any active Aide voice session in any bb window.", usage: "bb handsfree stop" },
       { name: "mute", summary: "Mute the active voice session's microphone (call stays up).", usage: "bb handsfree mute" },
       { name: "unmute", summary: "Unmute the active voice session's microphone.", usage: "bb handsfree unmute" },
@@ -1224,6 +1281,7 @@ export default async function plugin(bb: BbPluginApi) {
         "  bb handsfree live [--json]            threads that are live right now",
         "  bb handsfree read <thread-id>         thread status + latest assistant output",
         "  bb handsfree usage [--days N] [--json] voice-session tokens and estimated cost",
+        "  bb handsfree tools [--days N] [--json] tool calls, errors, and latency",
         "  bb handsfree stop                     stop any active voice session",
         "  bb handsfree mute | unmute            mute/unmute the active session's mic",
       ].join("\n");
@@ -1260,6 +1318,54 @@ export default async function plugin(bb: BbPluginApi) {
           const t = thread as { title?: string | null; status?: string };
           const header = `${threadId}  [${t.status ?? "?"}]  ${t.title ?? "(untitled)"}`;
           return { exitCode: 0, stdout: `${header}\n\n${output ? truncate(output, 20000) : "(no assistant output yet)"}` };
+        }
+        if (command === "tools") {
+          const daysFlag = rest.indexOf("--days");
+          const days = daysFlag >= 0 ? Number(rest[daysFlag + 1]) || 30 : 30;
+          const since = Date.now() - days * 86_400_000;
+          const rows = db
+            .prepare("SELECT tool, ok, ms, error FROM tool_events WHERE at >= ? ORDER BY tool, at")
+            .all(since) as ToolEventRow[];
+          const summarize = (events: ToolEventRow[]) => {
+            const latencies = events.map((row) => row.ms).sort((a, b) => a - b);
+            const errors = events.filter((row) => row.ok === 0).length;
+            return {
+              calls: events.length,
+              errors,
+              errorRatePct: events.length === 0 ? 0 : Number(((errors / events.length) * 100).toFixed(2)),
+              medianMs: median(latencies),
+              p90Ms: nearestRank(latencies, 0.9),
+            };
+          };
+          const grouped = new Map<string, ToolEventRow[]>();
+          for (const row of rows) {
+            const events = grouped.get(row.tool);
+            if (events) events.push(row);
+            else grouped.set(row.tool, [row]);
+          }
+          const tools = [...grouped.entries()].map(([tool, events]) => ({ tool, ...summarize(events) }));
+          const errorCounts = new Map<string, number>();
+          for (const row of rows) {
+            if (row.ok === 0 && row.error) errorCounts.set(row.error, (errorCounts.get(row.error) ?? 0) + 1);
+          }
+          const topErrorClasses = [...errorCounts.entries()]
+            .map(([error, calls]) => ({ error, calls }))
+            .sort((a, b) => b.calls - a.calls || a.error.localeCompare(b.error));
+          const report = { days, tools, totals: summarize(rows), topErrorClasses };
+          if (rest.includes("--json")) {
+            return { exitCode: 0, stdout: JSON.stringify(report, null, 2) };
+          }
+          if (rows.length === 0) return { exitCode: 0, stdout: `No tool calls recorded in the last ${days} day(s).` };
+          const lines = tools.map(
+            (tool) => `${tool.tool}  ${tool.calls} calls · ${tool.errorRatePct.toFixed(2)}% errors · median ${tool.medianMs} ms · p90 ${tool.p90Ms} ms`,
+          );
+          const errorLine = topErrorClasses.length
+            ? topErrorClasses.map(({ error, calls }) => `${error} ${calls}`).join(", ")
+            : "none";
+          return {
+            exitCode: 0,
+            stdout: `Tool usage, last ${days} day(s):\n${lines.join("\n")}\nTotal: ${report.totals.calls} calls · ${report.totals.errorRatePct.toFixed(2)}% errors · median ${report.totals.medianMs} ms · p90 ${report.totals.p90Ms} ms\nTop error classes: ${errorLine}`,
+          };
         }
         if (command === "usage") {
           const daysFlag = rest.indexOf("--days");
@@ -1609,14 +1715,28 @@ export default async function plugin(bb: BbPluginApi) {
       );
       return { ok: true as const };
     },
-    async runTool({ name, args, threadId, projectId, onNewThreadScreen }) {
+    async runTool({ name, args, threadId, projectId, onNewThreadScreen, sessionId }) {
       bb.log.info(`voice tool: ${name} ${JSON.stringify(args).slice(0, 300)}`);
+      const started = performance.now();
+      const recordToolEvent = (ok: boolean, error: ToolErrorClass | null) => {
+        const ms = Math.max(0, Math.round(performance.now() - started));
+        try {
+          db.prepare(
+            "INSERT INTO tool_events (session_id, tool, ok, ms, error, at) VALUES (?, ?, ?, ?, ?, ?)",
+          ).run(sessionId ?? null, name, ok ? 1 : 0, ms, error, Date.now());
+        } catch (storageError) {
+          bb.log.warn(`could not record voice tool telemetry: ${storageError instanceof Error ? storageError.message : String(storageError)}`);
+        }
+      };
       try {
         const output = await runTool(name, args, { threadId, projectId, onNewThreadScreen });
+        recordToolEvent(true, null);
         return { output };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        bb.log.warn(`voice tool ${name} failed: ${message}`);
+        const errorClass = classifyToolError(error);
+        recordToolEvent(false, errorClass);
+        bb.log.warn(`voice tool ${name} failed [${errorClass}]: ${message}`);
         return { output: `Tool error: ${message}` };
       }
     },

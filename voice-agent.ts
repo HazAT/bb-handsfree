@@ -1022,6 +1022,7 @@ export class VoiceAgent {
           name,
           args: suppressFocus ? { ...args, focus: false } : args,
           ...bindings.context,
+          sessionId: this.nonce ?? undefined,
         });
         output = result.output;
       } catch (error) {
