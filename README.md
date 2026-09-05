@@ -82,10 +82,13 @@ Night"*, *"Turn on night light"*, *"Set volume to 40 percent"*, *"Focus
 Signal"*, or *"Explain my touchpad config"*. Omar can inspect Hyprland and
 read approved config files. The fallback command router accepts only a fixed
 list of argument-free status, menu, capture, launcher, and desktop-control
-commands; help remains available for every known Omarchy route. Everything
-else—including routes with arguments, sudo/package routes, config refreshes,
-command-bearing launchers, and power session commands—is denied. Toggle this
-access under Settings → Plugins →
+commands; help remains available for every known Omarchy route. The editor
+target opens only existing files under the home directory or the approved
+Omarchy config roots. That restriction guards the assistant; it is not a
+security boundary against other local processes. Everything else—including
+routes with arguments, sudo/package routes, config refreshes, command-bearing
+launchers, and power session commands—is denied. Toggle this access under
+Settings → Plugins →
 Handsfree → Behavior → **Omarchy tools**.
 
 ## Inspecting live threads from the terminal

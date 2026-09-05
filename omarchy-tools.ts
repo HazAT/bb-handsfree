@@ -446,7 +446,7 @@ function normalizedRoute(args: Record<string, unknown>): string {
   return route;
 }
 
-const ALLOWED_ROUTES = new Set([
+export const ALLOWED_ROUTES = new Set([
   "theme list", "theme current", "theme switcher", "theme bg current",
   "theme bg next", "theme bg-switcher", "font list", "font current",
   "battery status", "network status", "update available", "version",
@@ -455,11 +455,28 @@ const ALLOWED_ROUTES = new Set([
   "audio source switch", "capture screenshot", "capture text", "capture qr",
   "screensaver", "notification time", "notification battery",
   "notification weather", "menu keybindings", "menu clipboard", "menu emoji",
-  "launch about", "launch nautilus", "launch spotify", "launch signal",
-  "launch 1password", "launch discord community", "launch screensaver",
-  "hyprland monitor focused", "hyprland monitor laptop", "voxtype status",
+  "launch about", "launch nautilus", "launch discord community",
+  "launch screensaver", "hyprland monitor focused", "hyprland monitor laptop",
   "toggle crash capture", "display text size",
 ]);
+
+const OPTIONAL_LAUNCHERS = {
+  spotify: { binary: "spotify", label: "Spotify" },
+  signal: { binary: "signal-desktop", label: "Signal" },
+  "1password": { binary: "1password", label: "1Password" },
+} as const;
+
+async function requireInstalledLauncher(
+  target: keyof typeof OPTIONAL_LAUNCHERS,
+  deps: OmarchyToolDeps,
+): Promise<void> {
+  const { binary, label } = OPTIONAL_LAUNCHERS[target];
+  try {
+    await deps.exec("omarchy", ["cmd", "present", binary], { timeoutMs: QUICK_TIMEOUT_MS });
+  } catch {
+    throw new OmarchyToolError("denied", `${label} is not installed; installing needs a terminal`);
+  }
+}
 
 async function knownRoute(route: string, deps: OmarchyToolDeps): Promise<CommandInfo> {
   const command = (await commandCatalog(deps)).get(route);
@@ -595,6 +612,9 @@ export async function runOmarchyTool(
         await execute(deps, "omarchy", ["launch", "editor", path]);
       } else {
         if (arg !== undefined) bad("arg is only valid for the editor target");
+        if (target in OPTIONAL_LAUNCHERS) {
+          await requireInstalledLauncher(target as keyof typeof OPTIONAL_LAUNCHERS, deps);
+        }
         await execute(deps, "omarchy", ["launch", target === "files" ? "nautilus" : target]);
       }
       return `Launched ${target}.`;

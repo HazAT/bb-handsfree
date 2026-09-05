@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
+  ALLOWED_ROUTES,
   OMARCHY_TOOL_SCHEMAS,
   OmarchyToolError,
   omarchyAvailable,
@@ -25,7 +27,7 @@ interface CatalogCommand {
   summary: string;
   requires_sudo: boolean;
   hidden: boolean;
-  args: unknown[];
+  args: string;
   examples: string[];
 }
 
@@ -42,9 +44,25 @@ function catalogCommand(
     summary: `${route} test fixture`,
     requires_sudo: false,
     hidden: false,
-    args: [],
+    args: route === "launch terminal" ? "[--shell]" : "",
     examples: [],
     ...overrides,
+  };
+}
+
+function realDeps(): OmarchyToolDeps {
+  return {
+    home: homedir(),
+    exec(file, argv, { timeoutMs }) {
+      return new Promise((resolve, reject) => {
+        execFile(
+          file,
+          argv,
+          { encoding: "utf8", maxBuffer: 2 * 1024 * 1024, timeout: timeoutMs },
+          (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }),
+        );
+      });
+    },
   };
 }
 
@@ -103,6 +121,10 @@ test("the long-tail executor accepts only fixed, argument-free catalog routes", 
     "network qr",
     "launch editor",
     "launch terminal",
+    "launch spotify",
+    "launch signal",
+    "launch 1password",
+    "voxtype status",
     "toggle",
     "mise install",
     "theme current extra",
@@ -132,6 +154,28 @@ test("the long-tail executor accepts only fixed, argument-free catalog routes", 
   assert.equal(
     await runOmarchyTool("omarchy_command", { route: "system lock", confirmed: true }, deps),
     "allowed",
+  );
+});
+
+test("the fixed route list matches the real Omarchy catalog", { skip: !omarchyAvailable() }, async () => {
+  const deps = realDeps();
+  const { stdout } = await deps.exec("omarchy", ["commands", "--json"], { timeoutMs: 15_000 });
+  const commands = (JSON.parse(stdout) as { commands: CatalogCommand[] }).commands;
+  const catalog = new Map(commands.map((command) => [command.route.replace(/^omarchy /, ""), command]));
+
+  for (const route of ALLOWED_ROUTES) {
+    const command = catalog.get(route);
+    assert.ok(command, `fixed route is missing from the real catalog: ${route}`);
+    assert.equal(command.hidden, false, `fixed route is hidden: ${route}`);
+    assert.equal(command.requires_sudo, false, `fixed route requires sudo: ${route}`);
+  }
+
+  const hybridGpu = catalog.get("toggle hybrid gpu");
+  assert.ok(hybridGpu, "toggle hybrid gpu is missing from the real catalog");
+  assert.equal(hybridGpu.requires_sudo, true);
+  await rejectsWithCode(
+    runOmarchyTool("omarchy_command", { route: "toggle hybrid gpu", confirmed: true }, deps),
+    "denied",
   );
 });
 
@@ -252,6 +296,41 @@ test("omarchy_status caps its final assembled output", async () => {
   const output = await runOmarchyTool("omarchy_status", {}, deps);
   assert.ok(output.length < 4_100);
   assert.match(output, /\[truncated\]$/);
+});
+
+test("optional launchers check their executable before invoking installer-capable routes", async () => {
+  const launchers = [
+    { target: "spotify", binary: "spotify", label: "Spotify" },
+    { target: "signal", binary: "signal-desktop", label: "Signal" },
+    { target: "1password", binary: "1password", label: "1Password" },
+  ] as const;
+  const present = fakeDeps();
+
+  for (const { target } of launchers) {
+    assert.equal(await runOmarchyTool("omarchy_launch", { target }, present.deps), `Launched ${target}.`);
+  }
+  assert.deepEqual(present.calls.map(({ argv }) => argv), launchers.flatMap(({ target, binary }) => [
+    ["cmd", "present", binary],
+    ["launch", target],
+  ]));
+
+  for (const { target, binary, label } of launchers) {
+    const calls: Call[] = [];
+    const deps: OmarchyToolDeps = {
+      home: "/home/test",
+      async exec(file, argv, { timeoutMs }) {
+        calls.push({ file, argv, timeoutMs });
+        throw new Error("not found");
+      },
+    };
+    await assert.rejects(
+      runOmarchyTool("omarchy_launch", { target }, deps),
+      (error: unknown) => error instanceof OmarchyToolError
+        && error.code === "denied"
+        && error.message === `${label} is not installed; installing needs a terminal`,
+    );
+    assert.deepEqual(calls, [{ file: "omarchy", argv: ["cmd", "present", binary], timeoutMs: 5_000 }]);
+  }
 });
 
 test("positional Omarchy values reject option-like input and editor paths stay in allowed roots", async (t) => {
