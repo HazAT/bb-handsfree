@@ -80,12 +80,12 @@ On an [Omarchy](https://omarchy.org/) desktop, Handsfree automatically enables
 Omar's native desktop tools. Ask *"How is the system?"*, *"Switch to Tokyo
 Night"*, *"Turn on night light"*, *"Set volume to 40 percent"*, *"Focus
 Signal"*, or *"Explain my touchpad config"*. Omar can inspect Hyprland and
-read approved config files. The fallback command router explicitly allows
-appearance and toggle controls, audio/brightness and device status, safe
-network/Hyprland/notification utilities, reminders and weather, update and
-system status, and a fixed set of app launchers. Everything else—including
-sudo/package routes, config refreshes, command-bearing launchers, and power
-session commands—is denied. Toggle this access under Settings → Plugins →
+read approved config files. The fallback command router accepts only a fixed
+list of argument-free status, menu, capture, launcher, and desktop-control
+commands; help remains available for every known Omarchy route. Everything
+else—including routes with arguments, sudo/package routes, config refreshes,
+command-bearing launchers, and power session commands—is denied. Toggle this
+access under Settings → Plugins →
 Handsfree → Behavior → **Omarchy tools**.
 
 ## Inspecting live threads from the terminal

@@ -81,6 +81,9 @@ test("exports the complete focused Omarchy schema set", () => {
   assert.ok(names.includes("read_config_file"));
   assert.ok(names.includes("omarchy_help"));
   assert.ok(names.includes("omarchy_command"));
+  const command = OMARCHY_TOOL_SCHEMAS.find((tool) => tool.name === "omarchy_command");
+  assert.ok(command);
+  assert.equal("args" in command.parameters.properties, false);
 });
 
 test("precise tools validate arguments before exec and always pass argv plus a timeout", async () => {
@@ -94,53 +97,118 @@ test("precise tools validate arguments before exec and always pass argv plus a t
   assert.equal(calls.length, 1);
 });
 
-test("the long-tail executor allowlists safe catalog routes and denies everything else", async () => {
+test("the long-tail executor accepts only fixed, argument-free catalog routes", async () => {
   const denied = [
-    "launch or focus",
+    "notification send",
+    "network qr",
+    "launch editor",
     "launch terminal",
-    "launch tui",
+    "toggle",
     "mise install",
-    "refresh config",
-    "hyprland toggle",
-    "network password",
+    "theme current extra",
+    "theme currentx",
   ];
-  const allowed = ["theme set", "toggle nightlight", "launch browser"];
-  const confirmations = ["system lock", "hyprland monitor internal", "toggle hybrid gpu"];
   const catalog = [
     ...denied.map((route) => catalogCommand(route)),
-    ...allowed.map((route) => catalogCommand(route)),
-    ...confirmations.map((route) => catalogCommand(route)),
-    catalogCommand("theme hidden", { hidden: true }),
-    catalogCommand("audio privileged", { requires_sudo: true }),
+    catalogCommand("theme current"),
+    catalogCommand("system lock"),
+    catalogCommand("toggle hybrid gpu", { requires_sudo: true }),
+    catalogCommand("theme list", { hidden: true }),
   ];
   const { deps, calls } = fakeDeps(catalog, "allowed");
 
-  for (const route of [...denied, "theme hidden", "audio privileged", ...confirmations]) {
+  for (const route of [...denied, "toggle hybrid gpu", "theme list", "system lock"]) {
     await rejectsWithCode(runOmarchyTool("omarchy_command", { route }, deps), "denied");
   }
   assert.equal(calls.length, 1, "denied routes must stop after the cached catalog lookup");
 
-  for (const route of allowed) {
-    assert.equal(await runOmarchyTool("omarchy_command", { route }, deps), "allowed");
-  }
-  assert.deepEqual(calls.slice(-3).map(({ argv }) => argv), [
-    ["theme", "set"],
-    ["toggle", "nightlight"],
-    ["launch", "browser"],
-  ]);
+  assert.equal(await runOmarchyTool("omarchy_command", { route: "theme current" }, deps), "allowed");
+  assert.deepEqual(calls.at(-1), {
+    file: "omarchy",
+    argv: ["theme", "current"],
+    timeoutMs: 15_000,
+  });
 
-  for (const route of confirmations) {
-    await runOmarchyTool("omarchy_command", { route, confirmed: true }, deps);
-  }
+  assert.equal(
+    await runOmarchyTool("omarchy_command", { route: "system lock", confirmed: true }, deps),
+    "allowed",
+  );
 });
 
-test("omarchy_command validates argv before loading or executing a route", async () => {
-  const { deps, calls } = fakeDeps([catalogCommand("update available")]);
+test("omarchy_command rejects args before loading or executing a route", async () => {
+  const { deps, calls } = fakeDeps([catalogCommand("theme current")]);
   await rejectsWithCode(
-    runOmarchyTool("omarchy_command", { route: "update available", args: ["--json", 2] }, deps),
+    runOmarchyTool("omarchy_command", { route: "theme current", args: [] }, deps),
     "bad_args",
   );
   assert.equal(calls.length, 0);
+});
+
+test("Hyprland dispatch uses validated Lua dispatchers", async () => {
+  const { deps, calls } = fakeDeps();
+
+  await runOmarchyTool("hyprland_dispatch", { action: "workspace", arg: "3" }, deps);
+  await runOmarchyTool("hyprland_dispatch", { action: "workspace", arg: "name:bb" }, deps);
+  await runOmarchyTool("hyprland_dispatch", { action: "move_to_workspace", arg: "name:bb" }, deps);
+  await runOmarchyTool("hyprland_dispatch", { action: "focus_window", arg: "address:0xdead" }, deps);
+  await runOmarchyTool("hyprland_dispatch", { action: "fullscreen" }, deps);
+  await runOmarchyTool("hyprland_dispatch", { action: "toggle_floating" }, deps);
+  await runOmarchyTool("hyprland_dispatch", { action: "close_active", confirmed: true }, deps);
+
+  assert.deepEqual(calls.map(({ file, argv }) => ({ file, argv })), [
+    { file: "hyprctl", argv: ["eval", 'hl.dispatch(hl.dsp.focus({ workspace = "3" }))'] },
+    { file: "hyprctl", argv: ["eval", 'hl.dispatch(hl.dsp.focus({ workspace = "name:bb" }))'] },
+    { file: "hyprctl", argv: ["eval", 'hl.dispatch(hl.dsp.window.move({ workspace = "name:bb" }))'] },
+    { file: "hyprctl", argv: ["eval", 'hl.dispatch(hl.dsp.focus({ window = "address:0xdead" }))'] },
+    { file: "hyprctl", argv: ["eval", 'hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen" }))'] },
+    { file: "hyprctl", argv: ["eval", 'hl.dispatch(hl.dsp.window.float({ action = "toggle" }))'] },
+    { file: "hyprctl", argv: ["eval", "hl.dispatch(hl.dsp.window.close())"] },
+  ]);
+
+  await rejectsWithCode(
+    runOmarchyTool("hyprland_dispatch", { action: "workspace", arg: '3; os.execute("id")' }, deps),
+    "bad_args",
+  );
+  await rejectsWithCode(
+    runOmarchyTool("hyprland_dispatch", { action: "close_active" }, deps),
+    "denied",
+  );
+  assert.equal(calls.length, 7);
+
+  const warning = "warning: hl.focus: window not found";
+  const warningDeps = fakeDeps([], warning).deps;
+  assert.equal(
+    await runOmarchyTool("hyprland_dispatch", { action: "focus_window", arg: "address:0xdead" }, warningDeps),
+    warning,
+  );
+});
+
+test("Hyprland focus resolves an exact class or title to a validated address", async () => {
+  const calls: Call[] = [];
+  const deps: OmarchyToolDeps = {
+    home: "/home/test",
+    async exec(file, argv, { timeoutMs }) {
+      calls.push({ file, argv, timeoutMs });
+      if (file === "hyprctl" && argv.join(" ") === "clients -j") {
+        return {
+          stdout: JSON.stringify([{ address: "0xabc123", class: "org.example.App", title: "Example" }]),
+          stderr: "",
+        };
+      }
+      return { stdout: "ok", stderr: "" };
+    },
+  };
+
+  await runOmarchyTool("hyprland_dispatch", { action: "focus_window", arg: "Example" }, deps);
+  assert.deepEqual(calls.map(({ argv }) => argv), [
+    ["clients", "-j"],
+    ["eval", 'hl.dispatch(hl.dsp.focus({ window = "address:0xabc123" }))'],
+  ]);
+  await rejectsWithCode(
+    runOmarchyTool("hyprland_dispatch", { action: "focus_window", arg: "Not running" }, deps),
+    "bad_args",
+  );
+  assert.equal(calls.at(-1)?.argv.join(" "), "clients -j");
 });
 
 test("omarchy_help discovers even denied routes without running them and caps output", async () => {
@@ -184,6 +252,26 @@ test("omarchy_status caps its final assembled output", async () => {
   const output = await runOmarchyTool("omarchy_status", {}, deps);
   assert.ok(output.length < 4_100);
   assert.match(output, /\[truncated\]$/);
+});
+
+test("positional Omarchy values reject option-like input and editor paths stay in allowed roots", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "omarchy-editor-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = join(home, "notes.txt");
+  await writeFile(file, "notes");
+  const { deps, calls } = fakeDeps();
+  deps.home = home;
+
+  await runOmarchyTool("omarchy_launch", { target: "editor", arg: file }, deps);
+  assert.deepEqual(calls.at(-1)?.argv, ["launch", "editor", file]);
+
+  await rejectsWithCode(runOmarchyTool("omarchy_notify", { headline: "--exec" }, deps), "bad_args");
+  await rejectsWithCode(runOmarchyTool("omarchy_reminder", { minutes: 5, message: "-i" }, deps), "bad_args");
+  await rejectsWithCode(runOmarchyTool("omarchy_launch", { target: "editor", arg: "/etc/passwd" }, deps), "denied");
+  await rejectsWithCode(runOmarchyTool("omarchy_launch", { target: "editor", arg: "--inline" }, deps), "bad_args");
+  await rejectsWithCode(runOmarchyTool("omarchy_theme", { action: "set", name: "../Tokyo Night" }, deps), "bad_args");
+  await rejectsWithCode(runOmarchyTool("omarchy_focus_app", { app_name: "-i" }, deps), "bad_args");
+  assert.equal(calls.length, 1);
 });
 
 test("Hyprland option tools validate dotted keys and safely encode typed values", async () => {

@@ -1,4 +1,4 @@
-import { access, readFile, realpath } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { accessSync, constants } from "node:fs";
 import { basename, delimiter, isAbsolute, resolve, sep } from "node:path";
 
@@ -6,7 +6,6 @@ const QUICK_TIMEOUT_MS = 5_000;
 const ROUTE_TIMEOUT_MS = 15_000;
 const STATUS_DEADLINE_MS = 1_500;
 const OUTPUT_LIMIT = 4_000;
-const MAX_ARG_LENGTH = 2_000;
 
 export interface OmarchyToolDeps {
   exec(
@@ -189,10 +188,9 @@ export const OMARCHY_TOOL_SCHEMAS = [
   ),
   functionTool(
     "omarchy_command",
-    "Run a discovered, non-privileged Omarchy route when no precise tool fits. Call omarchy_help first. Unsafe routes are denied, and disruptive routes require confirmed=true.",
+    "Run one fixed, argument-free Omarchy route when no precise tool fits. Call omarchy_help first. Only system lock accepts confirmed=true after confirmation.",
     {
-      route: { type: "string", description: "Known route without the leading 'omarchy'." },
-      args: { type: "array", items: { type: "string" }, maxItems: 30 },
+      route: { type: "string", description: "Known argument-free route without the leading 'omarchy'." },
       confirmed: { type: "boolean" },
     },
     ["route"],
@@ -208,6 +206,22 @@ function textArg(args: Record<string, unknown>, key: string, max = 200): string 
   if (typeof value !== "string" || value.trim() === "") bad(`${key} is required`);
   if (value.length > max || /[\0\r\n]/.test(value)) bad(`${key} is too long or contains control characters`);
   return value;
+}
+
+function positionalArg(args: Record<string, unknown>, key: string, max = 200): string {
+  const value = textArg(args, key, max);
+  if (value.startsWith("-") || /[\0-\x1f\x7f]/.test(value)) {
+    bad(`${key} must be a short positional value and cannot start with '-' or contain control characters`);
+  }
+  return value;
+}
+
+function themeName(args: Record<string, unknown>): string {
+  const name = positionalArg(args, "name", 64);
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(name)) {
+    bad("name must contain only letters, numbers, spaces, dots, underscores, or hyphens");
+  }
+  return name;
 }
 
 function enumArg<const T extends readonly string[]>(
@@ -360,6 +374,36 @@ function configExpression(key: string, value: string): string {
   return `hl.config(${nested})`;
 }
 
+const WINDOW_ADDRESS = /^address:0x[0-9a-f]{1,16}$/;
+
+async function resolveWindow(args: Record<string, unknown>, deps: OmarchyToolDeps): Promise<string> {
+  const selector = positionalArg(args, "arg");
+  if (WINDOW_ADDRESS.test(selector)) return selector;
+
+  const output = await execute(deps, "hyprctl", ["clients", "-j"], QUICK_TIMEOUT_MS, Number.POSITIVE_INFINITY);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new OmarchyToolError("exec_failed", "Hyprland returned invalid window state.");
+  }
+  const wanted = selector.toLocaleLowerCase();
+  const window = Array.isArray(parsed)
+    ? parsed.find((candidate) => {
+        if (!candidate || typeof candidate !== "object") return false;
+        const row = candidate as Record<string, unknown>;
+        return [row.class, row.title].some(
+          (value) => typeof value === "string" && value.toLocaleLowerCase() === wanted,
+        );
+      }) as Record<string, unknown> | undefined
+    : undefined;
+  const address = typeof window?.address === "string" ? `address:${window.address}` : "";
+  if (!WINDOW_ADDRESS.test(address)) {
+    bad("arg must be an address:0x... selector or exactly match a current window class or title");
+  }
+  return address;
+}
+
 interface CommandInfo {
   route: string;
   requires_sudo?: boolean;
@@ -402,44 +446,20 @@ function normalizedRoute(args: Record<string, unknown>): string {
   return route;
 }
 
-function routeStarts(route: string, prefix: string): boolean {
-  return route === prefix || route.startsWith(`${prefix} `);
-}
-
-const ALLOWED_ROUTE_PREFIXES = [
-  "theme", "toggle", "audio", "brightness", "battery", "bluetooth", "font",
-  "network status", "network speedtest", "network qr", "hyprland", "capture",
-  "notification", "osd", "reminder", "weather", "powerprofiles list",
-  "powerprofiles set", "system lock", "system wake", "system stats",
-  "update available", "update status", "version", "menu", "screensaver",
-  "voxtype status", "agent usage", "launch browser", "launch webapp",
-  "launch editor", "launch config editor", "launch about", "launch screensaver",
-  "launch nautilus", "launch spotify", "launch signal", "launch 1password",
-  "launch discord community",
-];
-
-const BLOCKED_ROUTE_PREFIXES = [
-  "theme remove", "theme install", "theme update", "hyprland toggle",
-  "hyprland window close all",
-];
-
-function deniedRoute(route: string): boolean {
-  if (BLOCKED_ROUTE_PREFIXES.some((prefix) => routeStarts(route, prefix))) return true;
-  return !ALLOWED_ROUTE_PREFIXES.some((prefix) => routeStarts(route, prefix));
-}
-
-function confirmationRequired(route: string): boolean {
-  return ["system lock", "hyprland monitor internal", "toggle hybrid gpu"].some((prefix) => routeStarts(route, prefix));
-}
-
-function routeArgs(args: Record<string, unknown>): string[] {
-  if (args.args === undefined) return [];
-  if (!Array.isArray(args.args) || args.args.length > 30) bad("args must be an array of at most 30 strings");
-  return args.args.map((arg) => {
-    if (typeof arg !== "string" || arg.length > MAX_ARG_LENGTH || arg.includes("\0")) bad("each command argument must be a short string");
-    return arg;
-  });
-}
+const ALLOWED_ROUTES = new Set([
+  "theme list", "theme current", "theme switcher", "theme bg current",
+  "theme bg next", "theme bg-switcher", "font list", "font current",
+  "battery status", "network status", "update available", "version",
+  "system stats", "system lock", "system wake", "powerprofiles list",
+  "weather status", "audio output switch", "audio input mute",
+  "audio source switch", "capture screenshot", "capture text", "capture qr",
+  "screensaver", "notification time", "notification battery",
+  "notification weather", "menu keybindings", "menu clipboard", "menu emoji",
+  "launch about", "launch nautilus", "launch spotify", "launch signal",
+  "launch 1password", "launch discord community", "launch screensaver",
+  "hyprland monitor focused", "hyprland monitor laptop", "voxtype status",
+  "toggle crash capture", "display text size",
+]);
 
 async function knownRoute(route: string, deps: OmarchyToolDeps): Promise<CommandInfo> {
   const command = (await commandCatalog(deps)).get(route);
@@ -447,17 +467,47 @@ async function knownRoute(route: string, deps: OmarchyToolDeps): Promise<Command
   return command;
 }
 
+function configRoots(home: string): string[] {
+  return [
+    resolve(home, ".config/hypr"),
+    resolve(home, ".config/omarchy"),
+    resolve(home, "omarchy-config/shared/config"),
+    "/usr/share/omarchy/default",
+    "/usr/share/omarchy/config",
+  ];
+}
+
+async function existingEditorPath(args: Record<string, unknown>, deps: OmarchyToolDeps): Promise<string> {
+  const requested = positionalArg(args, "arg", 1_000);
+  if (!isAbsolute(requested)) {
+    throw new OmarchyToolError("denied", "The editor path must be an absolute path in your home or an allowed config root.");
+  }
+  let actual: string;
+  try {
+    actual = await realpath(requested);
+  } catch {
+    throw new OmarchyToolError("denied", "The editor path must name an existing regular file.");
+  }
+  const roots = [resolve(deps.home), ...configRoots(deps.home)];
+  const realRoots = (await Promise.all(roots.map((root) => realpath(root).catch(() => null)))).filter(
+    (root): root is string => root !== null,
+  );
+  if (!realRoots.some((root) => actual === root || actual.startsWith(`${root}${sep}`))) {
+    throw new OmarchyToolError("denied", "The editor path is outside your home and the allowed configuration roots.");
+  }
+  try {
+    if (!(await stat(actual)).isFile()) throw new Error("not a file");
+  } catch {
+    throw new OmarchyToolError("denied", "The editor path must name an existing regular file.");
+  }
+  return actual;
+}
+
 async function readAllowedConfig(args: Record<string, unknown>, deps: OmarchyToolDeps): Promise<string> {
   const requested = textArg(args, "path", 1_000).replace(/^~(?=\/|$)/, deps.home);
   if (!isAbsolute(requested)) bad("path must be absolute or start with ~/");
   const target = resolve(requested);
-  const roots = [
-    resolve(deps.home, ".config/hypr"),
-    resolve(deps.home, ".config/omarchy"),
-    resolve(deps.home, "omarchy-config/shared/config"),
-    "/usr/share/omarchy/default",
-    "/usr/share/omarchy/config",
-  ];
+  const roots = configRoots(deps.home);
   let actual: string;
   try {
     actual = await realpath(target);
@@ -491,7 +541,7 @@ export async function runOmarchyTool(
       return runStatus(deps);
     case "omarchy_theme": {
       const action = enumArg(args, "action", ["list", "current", "set", "next_background"] as const);
-      if (action === "set") return execute(deps, "omarchy", ["theme", "set", textArg(args, "name")]);
+      if (action === "set") return execute(deps, "omarchy", ["theme", "set", themeName(args)]);
       if (args.name !== undefined) bad("name is only valid with action set");
       const route = action === "next_background" ? ["theme", "bg", "next"] : ["theme", action];
       return execute(deps, "omarchy", route);
@@ -541,7 +591,7 @@ export async function runOmarchyTool(
       const target = enumArg(args, "target", ["browser", "terminal", "editor", "files", "spotify", "signal", "1password", "about", "screensaver"] as const);
       const arg = args.arg;
       if (target === "editor") {
-        const path = textArg(args, "arg", 1_000);
+        const path = await existingEditorPath(args, deps);
         await execute(deps, "omarchy", ["launch", "editor", path]);
       } else {
         if (arg !== undefined) bad("arg is only valid for the editor target");
@@ -550,7 +600,7 @@ export async function runOmarchyTool(
       return `Launched ${target}.`;
     }
     case "omarchy_open_url": {
-      const raw = textArg(args, "url", 2_048);
+      const raw = positionalArg(args, "url", 2_048);
       let url: URL;
       try {
         url = new URL(raw);
@@ -562,7 +612,7 @@ export async function runOmarchyTool(
       return "Opened.";
     }
     case "omarchy_focus_app":
-      await execute(deps, "omarchy", ["hyprland", "focus", "app", textArg(args, "app_name")]);
+      await execute(deps, "omarchy", ["hyprland", "focus", "app", positionalArg(args, "app_name")]);
       return "Focused.";
     case "hyprland_query": {
       const kind = enumArg(args, "kind", ["active_window", "windows", "workspaces", "monitors"] as const);
@@ -587,10 +637,27 @@ export async function runOmarchyTool(
       const action = enumArg(args, "action", ["workspace", "focus_window", "move_to_workspace", "fullscreen", "toggle_floating", "close_active"] as const);
       if (action === "close_active" && args.confirmed !== true) throw new OmarchyToolError("denied", "Closing the active window needs a confirmation first.");
       const needsArg = action === "workspace" || action === "focus_window" || action === "move_to_workspace";
-      const arg = needsArg ? textArg(args, "arg", 200) : undefined;
       if (!needsArg && args.arg !== undefined) bad(`arg is not valid for ${action}`);
-      const dispatcher = { workspace: "workspace", focus_window: "focuswindow", move_to_workspace: "movetoworkspace", fullscreen: "fullscreen", toggle_floating: "togglefloating", close_active: "killactive" }[action];
-      await execute(deps, "hyprctl", ["dispatch", dispatcher, ...(arg ? [arg] : [])]);
+      let dispatcher: string;
+      if (action === "workspace" || action === "move_to_workspace") {
+        const workspace = positionalArg(args, "arg");
+        if (!/^(?:[0-9]{1,3}|name:[A-Za-z0-9_-]{1,32})$/.test(workspace)) {
+          bad("arg must be a workspace number or name:<letters-numbers-underscore-hyphen>");
+        }
+        const options = `{ workspace = ${luaValue(workspace)} }`;
+        dispatcher = action === "workspace" ? `hl.dsp.focus(${options})` : `hl.dsp.window.move(${options})`;
+      } else if (action === "focus_window") {
+        const window = await resolveWindow(args, deps);
+        dispatcher = `hl.dsp.focus({ window = ${luaValue(window)} })`;
+      } else if (action === "fullscreen") {
+        dispatcher = 'hl.dsp.window.fullscreen({ mode = "fullscreen" })';
+      } else if (action === "toggle_floating") {
+        dispatcher = 'hl.dsp.window.float({ action = "toggle" })';
+      } else {
+        dispatcher = "hl.dsp.window.close()";
+      }
+      const output = await execute(deps, "hyprctl", ["eval", `hl.dispatch(${dispatcher})`]);
+      if (output !== "ok" && output !== "Done.") return output;
       return action === "close_active" ? "Window closed." : "Done.";
     }
     case "hyprland_window": {
@@ -619,18 +686,18 @@ export async function runOmarchyTool(
       return `${key} updated temporarily, until the next Hyprland reload.`;
     }
     case "omarchy_notify": {
-      const headline = textArg(args, "headline", 200);
-      const body = args.body === undefined ? undefined : textArg(args, "body", 500);
+      const headline = positionalArg(args, "headline", 200);
+      const body = args.body === undefined ? undefined : positionalArg(args, "body", 500);
       await execute(deps, "omarchy", ["notification", "send", headline, ...(body ? [body] : [])]);
       return "Notification sent.";
     }
     case "omarchy_osd":
-      await execute(deps, "omarchy", ["osd", "-m", textArg(args, "message", 500)]);
+      await execute(deps, "omarchy", ["osd", "-m", positionalArg(args, "message", 500)]);
       return "Shown.";
     case "omarchy_reminder": {
       const minutes = args.minutes;
       if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < 1 || minutes > 10_080) bad("minutes must be a whole number from 1 to 10080");
-      const message = args.message === undefined ? undefined : textArg(args, "message", 500);
+      const message = args.message === undefined ? undefined : positionalArg(args, "message", 500);
       await execute(deps, "omarchy", ["reminder", String(minutes), ...(message ? [message] : [])]);
       return "Reminder set.";
     }
@@ -642,16 +709,16 @@ export async function runOmarchyTool(
       return execute(deps, "omarchy", [...route.split(" "), "--help"], ROUTE_TIMEOUT_MS);
     }
     case "omarchy_command": {
+      if (args.args !== undefined) bad("args are not accepted; omarchy_command routes are argument-free");
       const route = normalizedRoute(args);
-      const argv = routeArgs(args);
       const command = await knownRoute(route, deps);
-      if (command.hidden || command.requires_sudo || deniedRoute(route)) {
+      if (command.hidden || command.requires_sudo || !ALLOWED_ROUTES.has(route)) {
         throw new OmarchyToolError("denied", `The Omarchy route '${route}' is off limits here.`);
       }
-      if (confirmationRequired(route) && args.confirmed !== true) {
+      if (route === "system lock" && args.confirmed !== true) {
         throw new OmarchyToolError("denied", `The Omarchy route '${route}' needs a confirmation first.`);
       }
-      return execute(deps, "omarchy", [...route.split(" "), ...argv], ROUTE_TIMEOUT_MS);
+      return execute(deps, "omarchy", route.split(" "), ROUTE_TIMEOUT_MS);
     }
     default:
       return bad(`unknown Omarchy tool: ${name}`);
