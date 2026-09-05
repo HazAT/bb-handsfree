@@ -47,9 +47,9 @@ export function prepareSpeechText(markdown: string): string {
       .replace(/^\s*\[[ xX]\]\s+/, "")
       .replace(/~~(?=\S)(.*?\S)~~/g, "$1")
       .replace(/\*\*(?=\S)(.*?\S)\*\*/g, "$1")
-      .replace(/__(?=\S)(.*?\S)__/g, "$1")
+      .replace(/(^|[^\p{L}\p{N}_])__(?=\S)(.*?\S)__(?![\p{L}\p{N}_])/gu, "$1$2")
       .replace(/\*(?=\S)(.*?\S)\*/g, "$1")
-      .replace(/_(?=\S)(.*?\S)_/g, "$1")
+      .replace(/(^|[^\p{L}\p{N}_])_(?=\S)(.*?\S)_(?![\p{L}\p{N}_])/gu, "$1$2")
       .replace(/\s*\|\s*/g, " ")
       .replace(/\s+/g, " ")
       .trim();

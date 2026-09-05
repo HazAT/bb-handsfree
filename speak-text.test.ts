@@ -36,6 +36,13 @@ test("prepareSpeechText keeps link labels and strips markdown decoration", () =>
   );
 });
 
+test("prepareSpeechText preserves intraword underscores", () => {
+  assert.equal(
+    prepareSpeechText("Use foo_bar_baz with _care_ and __focus__."),
+    "Use foo_bar_baz with care and focus.",
+  );
+});
+
 test("prepareSpeechText strips table separators, pipes, and HTML tags", () => {
   const markdown = [
     "| Name | Value |",

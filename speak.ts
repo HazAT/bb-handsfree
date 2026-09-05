@@ -52,6 +52,8 @@ class Speaker {
       audio.setAttribute("playsinline", "");
       audio.style.display = "none";
       document.body.appendChild(audio);
+      audio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
+      void audio.play().catch(() => {});
 
       const pc = new RTCPeerConnection();
       pc.addTransceiver("audio", { direction: "recvonly" });
@@ -136,6 +138,18 @@ class Speaker {
       const type = String(event.type ?? "");
       if (type === "response.done") {
         if (!session.waitingForResponse) return;
+        const response = event.response as {
+          status?: unknown;
+          status_details?: { error?: { message?: unknown }; reason?: unknown };
+        } | undefined;
+        const status = typeof response?.status === "string" ? response.status : "unknown";
+        if (status !== "completed") {
+          const errorMessage = response?.status_details?.error?.message;
+          const reason = response?.status_details?.reason;
+          const detail = typeof errorMessage === "string" ? errorMessage : typeof reason === "string" ? reason : null;
+          this.fail(session, `reading failed (${status})${detail ? `: ${detail}` : ""}`);
+          return;
+        }
         session.waitingForResponse = false;
         if (session.nextChunk < session.chunks.length) this.sendNext(session);
         else session.finalResponseDone = true;
