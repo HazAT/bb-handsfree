@@ -173,6 +173,52 @@ test("the voice session is briefed on delegation, and the tool is sent, only whi
   }
 });
 
+test("Omarchy tools and Omar's desktop brief are included only while the setting is on", async () => {
+  const { host, toolNames } = await load();
+  const sessions: { instructions: string; tools: { name: string }[] }[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    sessions.push(JSON.parse(String((init?.body as FormData).get("session"))));
+    return new Response("v=0 answer", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await host.harness.callRpc("setConfig", { omarchyTools: false });
+    assert.ok(!(await toolNames()).includes("omarchy_status"));
+    const disabled = (await host.harness.callRpc("runTool", {
+      name: "omarchy_status",
+      args: {},
+      ...CONTEXT,
+    })) as { output: string };
+    assert.match(disabled.output, /turned off/);
+    await host.harness.callRpc("createCall", {
+      sdp: "v=0 offer",
+      threadId: null,
+      projectId: PROJECT,
+      nonce: "omarchy-off",
+    });
+    assert.doesNotMatch(sessions[0].instructions, /you go by Omar/);
+    assert.ok(!sessions[0].tools.some((tool) => tool.name === "omarchy_status"));
+
+    const config = (await host.harness.callRpc("setConfig", { omarchyTools: true })) as {
+      omarchyTools: boolean;
+    };
+    assert.equal(config.omarchyTools, true);
+    assert.ok((await toolNames()).includes("omarchy_status"));
+    assert.ok((await toolNames()).includes("read_config_file"));
+    await host.harness.callRpc("createCall", {
+      sdp: "v=0 offer",
+      threadId: null,
+      projectId: PROJECT,
+      nonce: "omarchy-on",
+    });
+    assert.match(sessions[1].instructions, /you go by Omar and introduce yourself as Omar/);
+    assert.match(sessions[1].instructions, /omarchy_help before omarchy_command/);
+    assert.ok(sessions[1].tools.some((tool) => tool.name === "hyprland_set_option"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("createSpeakCall sends the read-aloud session shape and returns the answer SDP", async () => {
   const { host } = await load();
   await host.harness.callRpc("setConfig", { voice: "cedar" });

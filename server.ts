@@ -4,9 +4,11 @@
 // app; this backend holds the OpenAI API key, performs the SDP exchange with
 // the OpenAI Realtime API, and executes the voice agent's tools against the
 // bb SDK (threads, projects, diffs, panes).
+import { execFile } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -20,6 +22,12 @@ import {
   type Voice,
 } from "./models.ts";
 import { DEFAULT_SHORTCUTS, isValidShortcut, normalizeShortcuts, type Shortcuts } from "./shortcuts.ts";
+import {
+  OMARCHY_TOOL_SCHEMAS,
+  omarchyAvailable,
+  runOmarchyTool,
+  type OmarchyToolDeps,
+} from "./omarchy-tools.ts";
 
 /**
  * Rebindable keyboard shortcuts (see shortcuts.ts): each value is a
@@ -127,6 +135,7 @@ export const rpcContract = defineRpcContract({
         notifications: z.boolean(),
         pluginCommands: z.string(),
         delegate: z.boolean(),
+        omarchyTools: z.boolean(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]),
         shortcuts: shortcutsSchema,
       })
@@ -141,6 +150,7 @@ export const rpcContract = defineRpcContract({
         notifications: z.boolean().optional(),
         pluginCommands: z.string().max(2000).optional(),
         delegate: z.boolean().optional(),
+        omarchyTools: z.boolean().optional(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]).optional(),
         shortcuts: shortcutsSchema.optional(),
       })
@@ -152,6 +162,7 @@ export const rpcContract = defineRpcContract({
         notifications: z.boolean(),
         pluginCommands: z.string(),
         delegate: z.boolean(),
+        omarchyTools: z.boolean(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]),
         shortcuts: shortcutsSchema,
       })
@@ -376,7 +387,10 @@ interface PluginCommandInfo {
   summary: string;
 }
 
-function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delegate?: boolean } = {}) {
+function toolSchemas(
+  pluginCommands: PluginCommandInfo[] = [],
+  options: { delegate?: boolean; omarchyTools?: boolean } = {},
+) {
   const delegateTool = options.delegate
     ? [
         {
@@ -432,6 +446,7 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delega
     { type: "function", name: "show_diff", description: "Summarize a thread's workspace diff (changed files, additions/deletions) and focus the thread so the user can see it.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "update_instructions", description: "Amend your own standing instructions (the system prompt for future voice sessions). Pass the COMPLETE new instructions text, not a diff. Use only when the user asks for a lasting behavior change.", parameters: { type: "object", properties: { instructions: { type: "string", description: "The full replacement instructions." }, reason: { type: "string", description: "One short sentence: why, quoting the user's request." } }, required: ["instructions", "reason"] } },
     ...delegateTool,
+    ...(options.omarchyTools ? OMARCHY_TOOL_SCHEMAS : []),
     // Handled locally in the bb app frontend, never reaches runTool:
     { type: "function", name: "set_composer_text", description: "Replace the text in the user's message composer (the box they type prompts into).", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { type: "function", name: "append_composer_text", description: "Append text to the user's message composer.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
@@ -477,6 +492,10 @@ const ASSISTANT_BRIEF = `You are the background agent for Aide, a voice assistan
 
 /** Appended to the voice session's instructions while delegation is enabled. */
 const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
+
+const OMARCHY_PROMPT_SECTION = `\n\nOn this Omarchy desktop, you go by Omar and introduce yourself as Omar; this overrides any other name in your standing instructions while these tools are enabled. You also operate Hyprland and the Omarchy shell. Prefer the precise Omarchy tools; when none fits, use omarchy_help before omarchy_command. Use omarchy_status when asked how the system is doing. Explain settings in plain words using read_config_file and hyprland_get_option, and never read paths or ids aloud. Runtime option changes are temporary until Hyprland reloads. Before a destructive or disruptive action, ask one short confirmation question and pass confirmed only after the user agrees. Confirm completed actions in one word. Light, dry wit is welcome—at most one brief aside per reply, never at the cost of brevity, and grounded only in real state such as the current theme or what just happened; never invent facts.`;
+
+const execFileAsync = promisify(execFile);
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -539,6 +558,8 @@ export default async function plugin(bb: BbPluginApi) {
     pluginCommands: string;
     /** Whether the delegate tool (Aide's own bb agent) is offered. */
     delegate: boolean;
+    /** Whether native Omarchy and Hyprland tools are offered. */
+    omarchyTools: boolean;
     credentialPreference: CredentialPreference;
     shortcuts: Shortcuts;
   }
@@ -549,6 +570,7 @@ export default async function plugin(bb: BbPluginApi) {
     notifications: true,
     pluginCommands: "all",
     delegate: true,
+    omarchyTools: omarchyAvailable(),
     credentialPreference: "auto",
     shortcuts: { ...DEFAULT_SHORTCUTS },
   };
@@ -562,6 +584,8 @@ export default async function plugin(bb: BbPluginApi) {
       pluginCommands:
         typeof stored.pluginCommands === "string" ? stored.pluginCommands : CONFIG_DEFAULTS.pluginCommands,
       delegate: typeof stored.delegate === "boolean" ? stored.delegate : CONFIG_DEFAULTS.delegate,
+      omarchyTools:
+        typeof stored.omarchyTools === "boolean" ? stored.omarchyTools : CONFIG_DEFAULTS.omarchyTools,
       credentialPreference: isCredentialPreference(stored.credentialPreference)
         ? stored.credentialPreference
         : CONFIG_DEFAULTS.credentialPreference,
@@ -606,6 +630,18 @@ export default async function plugin(bb: BbPluginApi) {
     }
     await bb.storage.kv.set("assistant.migrated", true);
   }
+
+  const omarchyDeps: OmarchyToolDeps = {
+    home: homedir(),
+    async exec(file, argv, { timeoutMs }) {
+      const { stdout, stderr } = await execFileAsync(file, argv, {
+        encoding: "utf8",
+        timeout: timeoutMs,
+        maxBuffer: 1_000_000,
+      });
+      return { stdout, stderr };
+    },
+  };
 
   // ---- plugin-command exposure ----
   // Other installed plugins contribute `bb` CLI commands. The voice agent
@@ -892,6 +928,11 @@ export default async function plugin(bb: BbPluginApi) {
     args: Record<string, unknown>,
     context: { threadId: string | null; projectId: string | null; onNewThreadScreen?: boolean },
   ): Promise<string> {
+    if (name === "read_config_file" || name.startsWith("omarchy_") || name.startsWith("hyprland_")) {
+      const { omarchyTools } = await readConfig();
+      if (!omarchyTools) return "Omarchy tools are turned off in Handsfree settings (Behavior → Omarchy tools).";
+      return runOmarchyTool(name, args, omarchyDeps);
+    }
     const str = (key: string): string => {
       const value = args[key];
       if (typeof value !== "string" || !value) throw new Error(`Missing argument: ${key}`);
@@ -1264,17 +1305,18 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     async createCall({ sdp, threadId, projectId, onNewThreadScreen, nonce }) {
       const key = await apiKey();
-      const { model, voice, delegate } = await readConfig();
+      const { model, voice, delegate, omarchyTools } = await readConfig();
       const pluginCommands = await exposedPluginCommands();
       const pluginSection =
         pluginCommands.length === 0
           ? ""
           : `\n\nInstalled bb plugins contribute extra commands you can run with run_plugin_command:\n${pluginCommands.map((c) => `- ${c.id}: bb ${c.name} — ${c.summary}`).join("\n")}\nWhen unsure of a plugin's subcommands, run it with argv ["--help"] first. Summarize command output aloud in a sentence or two; never read raw JSON or long output verbatim.`;
+      const omarchySection = omarchyTools ? OMARCHY_PROMPT_SECTION : "";
       const delegateSection = delegate ? DELEGATE_PROMPT_SECTION : "";
       const session = {
         type: "realtime",
         model,
-        instructions: `${activePrompt()}${pluginSection}${delegateSection}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
+        instructions: `${activePrompt()}${pluginSection}${omarchySection}${delegateSection}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
         audio: {
           input: {
             noise_reduction: { type: "near_field" },
@@ -1291,7 +1333,7 @@ export default async function plugin(bb: BbPluginApi) {
           },
           output: { voice },
         },
-        tools: toolSchemas(pluginCommands, { delegate }),
+        tools: toolSchemas(pluginCommands, { delegate, omarchyTools }),
       };
       const form = new FormData();
       form.set("sdp", sdp);
@@ -1340,9 +1382,9 @@ export default async function plugin(bb: BbPluginApi) {
     async getTools() {
       const local = new Set(["set_composer_text", "append_composer_text"]);
       const pluginCommands = await exposedPluginCommands();
-      const { delegate } = await readConfig();
+      const { delegate, omarchyTools } = await readConfig();
       return {
-        tools: toolSchemas(pluginCommands, { delegate }).map((tool) => ({
+        tools: toolSchemas(pluginCommands, { delegate, omarchyTools }).map((tool) => ({
           name: tool.name,
           description: tool.description ?? "",
           parameters: "parameters" in tool && tool.parameters ? JSON.stringify(tool.parameters) : null,

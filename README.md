@@ -74,6 +74,16 @@ A voice session is shared across all your bb windows and devices: the sidebar
 shows a live voice bar (with which device the session came through), and any
 window can pick it up or stop it.
 
+## Omarchy
+
+On an [Omarchy](https://omarchy.org/) desktop, Handsfree automatically enables
+Omar's native desktop tools. Ask *"How is the system?"*, *"Switch to Tokyo
+Night"*, *"Turn on night light"*, *"Set volume to 40 percent"*, *"Focus
+Signal"*, or *"Explain my touchpad config"*. Omar can inspect Hyprland and
+read approved config files, but cannot write config, run sudo/package routes,
+or perform denied system commands. Toggle this access under Settings → Plugins
+→ Handsfree → Behavior → **Omarchy tools**.
+
 ## Inspecting live threads from the terminal
 
 The same "Live threads" view from the sidebar is available as a CLI, for you
@@ -98,8 +108,9 @@ Open the Handsfree plugin settings for curated sections:
   and cedar are the highest-quality options), and a badge showing which
   credential Aide will use.
 - **Behavior** — whether Aide announces thread events, whether it may
-  delegate work to a bb agent of its own, and which installed plugins' `bb`
-  commands it may run (all / none / a specific list).
+  delegate work to a bb agent of its own, whether Omar may control an Omarchy
+  desktop, and which installed plugins' `bb` commands it may run (all / none /
+  a specific list).
 - **Audio** — pick and test the microphone with a live input-level meter. The
   chosen mic is stored in the current browser and applies to the next voice
   session; if it disconnects, Handsfree falls back to the system default.
