@@ -24,7 +24,15 @@ you.
 3. Click it. Allow microphone access the first time. When the bars start
    dancing, you're live — just talk. Click again to hang up.
 
-The button has three states:
+## Read a message aloud
+
+Use the **Speak** action on any chat message to read it aloud with the same
+OpenAI credential as Aide. Handsfree sends the prepared text directly from the
+browser to OpenAI and stores nothing from the read-aloud session. Tap **Speak**
+again to stop; when text is selected in an assistant message, the action reads
+only that selection.
+
+The Aide button has three states:
 
 | Button | Meaning |
 |---|---|

@@ -49,6 +49,11 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: z.object({ sdp: z.string() }).strict(),
   },
+  /** Exchange a read-aloud WebRTC SDP offer with OpenAI Realtime. */
+  createSpeakCall: {
+    input: z.object({ sdp: z.string().min(1) }).strict(),
+    output: z.object({ sdp: z.string() }).strict(),
+  },
   /** Record token usage from one realtime response.done event. */
   recordUsage: {
     input: z
@@ -1304,6 +1309,32 @@ export default async function plugin(bb: BbPluginApi) {
       // One voice session at a time, everywhere: every connected client hears
       // this and stops any session whose nonce differs.
       bb.realtime.publish("voice-call", { nonce });
+      return { sdp: text };
+    },
+    async createSpeakCall({ sdp }) {
+      const key = await apiKey();
+      const { voice } = await readConfig();
+      const session = {
+        type: "realtime",
+        model: "gpt-realtime-2.1-mini",
+        output_modalities: ["audio"],
+        audio: { output: { voice } },
+        instructions:
+          "You are a text-to-speech engine. Read the user's message aloud exactly as written, word for word. Do not add, omit, summarize, or comment.",
+      };
+      const form = new FormData();
+      form.set("sdp", sdp);
+      form.set("session", JSON.stringify(session));
+      const response = await fetch(REALTIME_ENDPOINT, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}` },
+        body: form,
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        bb.log.error(`OpenAI realtime speak call failed: ${response.status} ${text.slice(0, 500)}`);
+        throw new Error(`OpenAI realtime speak call failed: ${response.status} ${response.statusText}`);
+      }
       return { sdp: text };
     },
     async getTools() {

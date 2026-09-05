@@ -18,6 +18,7 @@ import {
 import type { PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { voiceAgent } from "./voice-agent";
+import { speaker } from "./speak";
 import { SessionsPanel } from "./sessions-panel";
 import { AudioSettings, BehaviorSettings, ModelsSettings, ShortcutsSettings } from "./settings-sections";
 import { cn } from "@/lib/utils";
@@ -94,6 +95,7 @@ function AideVoiceButton() {
   // new composer's button mounts and rebinds, so "this thread" and composer
   // edits follow the user while the call keeps running.
   useEffect(() => {
+    speaker.bind(rpc);
     voiceAgent.bind({
       rpc,
       context: { threadId, projectId: effectiveProjectId, onNewThreadScreen },
@@ -368,6 +370,16 @@ export default definePluginApp((app) => {
   // Optional: a voice bar above the thread list, for anyone who wants an
   // always-visible control. Off by default is not possible (registering
   // activates it), but users can pin BB's list under Settings → Appearance.
+  app.slots.messageAction({
+    id: "speak",
+    title: "Speak",
+    icon: "volume-2",
+    run: (ctx) =>
+      speaker.toggle({
+        key: ctx.selectedText ? `${ctx.message.id}:selection` : ctx.message.id,
+        text: ctx.selectedText ?? ctx.message.text,
+      }),
+  });
   app.slots.commandPaletteAction({
     id: "toggle-voice",
     title: "Handsfree: start/stop voice",
@@ -410,9 +422,13 @@ export default definePluginApp((app) => {
       // Release the mic synchronously before the page tears down. Without this,
       // a hard reload (Cmd+R) leaves the previous page holding the input device,
       // so the fresh page enumerates zero microphones until the OS reclaims it.
-      window.addEventListener("pagehide", () => voiceAgent.stop(), { signal });
-      signal.addEventListener("abort", () => voiceAgent.stop());
-      return () => voiceAgent.stop();
+      const stopAudio = () => {
+        voiceAgent.stop();
+        speaker.stop();
+      };
+      window.addEventListener("pagehide", stopAudio, { signal });
+      signal.addEventListener("abort", stopAudio);
+      return stopAudio;
     },
   });
 });

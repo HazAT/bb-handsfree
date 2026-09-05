@@ -162,7 +162,7 @@ function browserStorage(): Storage | null {
 }
 
 /** Wait for ICE gathering to finish (bounded) so we send a complete offer. */
-function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2000): Promise<void> {
+export function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2000): Promise<void> {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
     const timer = setTimeout(done, timeoutMs);

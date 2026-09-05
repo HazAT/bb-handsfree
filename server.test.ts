@@ -173,6 +173,39 @@ test("the voice session is briefed on delegation, and the tool is sent, only whi
   }
 });
 
+test("createSpeakCall sends the read-aloud session shape and returns the answer SDP", async () => {
+  const { host } = await load();
+  await host.harness.callRpc("setConfig", { voice: "cedar" });
+  const realFetch = globalThis.fetch;
+  let request: { url: unknown; init?: RequestInit } | null = null;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    request = { url, init };
+    return new Response("v=0 speak answer", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const result = await host.harness.callRpc("createSpeakCall", { sdp: "v=0 speak offer" });
+    assert.deepEqual(result, { sdp: "v=0 speak answer" });
+    assert.ok(request);
+    assert.equal(String(request.url), "https://api.openai.com/v1/realtime/calls");
+    assert.equal(request.init?.method, "POST");
+    assert.equal(new Headers(request.init?.headers).get("authorization"), "Bearer sk-test");
+    const form = request.init?.body;
+    assert.ok(form instanceof FormData);
+    assert.equal(form.get("sdp"), "v=0 speak offer");
+    assert.deepEqual(JSON.parse(String(form.get("session"))), {
+      type: "realtime",
+      model: "gpt-realtime-2.1-mini",
+      output_modalities: ["audio"],
+      audio: { output: { voice: "cedar" } },
+      instructions:
+        "You are a text-to-speech engine. Read the user's message aloud exactly as written, word for word. Do not add, omit, summarize, or comment.",
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("the default prompt makes Aide an orchestrator that relays in-thread speech to the thread's agent", async () => {
   const { host } = await load();
   const { defaultContent } = (await host.harness.callRpc("getPrompt", null)) as { defaultContent: string };
