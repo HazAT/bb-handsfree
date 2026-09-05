@@ -17,8 +17,39 @@ interface Call {
   timeoutMs: number;
 }
 
+interface CatalogCommand {
+  route: string;
+  binary: string;
+  group: string;
+  name: string;
+  summary: string;
+  requires_sudo: boolean;
+  hidden: boolean;
+  args: unknown[];
+  examples: string[];
+}
+
+function catalogCommand(
+  route: string,
+  overrides: Partial<Pick<CatalogCommand, "hidden" | "requires_sudo">> = {},
+): CatalogCommand {
+  const parts = route.split(" ");
+  return {
+    route: `omarchy ${route}`,
+    binary: `/usr/bin/omarchy-${parts.join("-")}`,
+    group: parts[0],
+    name: parts.at(-1) ?? route,
+    summary: `${route} test fixture`,
+    requires_sudo: false,
+    hidden: false,
+    args: [],
+    examples: [],
+    ...overrides,
+  };
+}
+
 function fakeDeps(
-  commands: Array<{ route: string; hidden?: boolean; requires_sudo?: boolean }> = [],
+  commands: CatalogCommand[] = [],
   output = "ok",
 ): { deps: OmarchyToolDeps; calls: Call[] } {
   const calls: Call[] = [];
@@ -63,71 +94,48 @@ test("precise tools validate arguments before exec and always pass argv plus a t
   assert.equal(calls.length, 1);
 });
 
-test("the long-tail executor enforces denylist, sudo metadata, and confirmation list", async () => {
+test("the long-tail executor allowlists safe catalog routes and denies everything else", async () => {
   const denied = [
-    "system shutdown",
-    "install foo",
-    "remove foo",
-    "pkg add",
-    "reinstall foo",
-    "setup foo",
-    "provision foo",
-    "migrate foo",
-    "hibernation foo",
-    "drive foo",
-    "dev foo",
-    "channel foo",
-    "upgrade foo",
-    "snapshot foo",
-    "factory foo",
-    "tui remove foo",
-    "webapp remove foo",
-    "plugin add foo",
-    "plugin remove foo",
-    "theme remove",
-    "theme install",
-    "theme update",
-    "hyprland window close all",
-    "update",
-    "refresh pacman",
-    "sudo foo",
+    "launch or focus",
+    "launch terminal",
+    "launch tui",
+    "mise install",
+    "refresh config",
+    "hyprland toggle",
+    "network password",
   ];
+  const allowed = ["theme set", "toggle nightlight", "launch browser"];
+  const confirmations = ["system lock", "hyprland monitor internal", "toggle hybrid gpu"];
   const catalog = [
-    ...denied.map((route) => ({ route: `omarchy ${route}` })),
-    { route: "omarchy safe sudo", requires_sudo: true },
-    { route: "omarchy system lock" },
-    { route: "omarchy hyprland monitor internal" },
-    { route: "omarchy toggle hybrid gpu" },
-    { route: "omarchy update available" },
+    ...denied.map((route) => catalogCommand(route)),
+    ...allowed.map((route) => catalogCommand(route)),
+    ...confirmations.map((route) => catalogCommand(route)),
+    catalogCommand("theme hidden", { hidden: true }),
+    catalogCommand("audio privileged", { requires_sudo: true }),
   ];
-  const { deps, calls } = fakeDeps(catalog, "available");
+  const { deps, calls } = fakeDeps(catalog, "allowed");
 
-  for (const route of [...denied, "safe sudo"]) {
-    await rejectsWithCode(runOmarchyTool("omarchy_command", { route }, deps), "denied");
-  }
-  for (const route of ["system lock", "hyprland monitor internal", "toggle hybrid gpu"]) {
+  for (const route of [...denied, "theme hidden", "audio privileged", ...confirmations]) {
     await rejectsWithCode(runOmarchyTool("omarchy_command", { route }, deps), "denied");
   }
   assert.equal(calls.length, 1, "denied routes must stop after the cached catalog lookup");
 
-  const result = await runOmarchyTool(
-    "omarchy_command",
-    { route: "update available", args: ["--json"], confirmed: false },
-    deps,
-  );
-  assert.equal(result, "available");
-  assert.deepEqual(calls.at(-1), {
-    file: "omarchy",
-    argv: ["update", "available", "--json"],
-    timeoutMs: 15_000,
-  });
+  for (const route of allowed) {
+    assert.equal(await runOmarchyTool("omarchy_command", { route }, deps), "allowed");
+  }
+  assert.deepEqual(calls.slice(-3).map(({ argv }) => argv), [
+    ["theme", "set"],
+    ["toggle", "nightlight"],
+    ["launch", "browser"],
+  ]);
 
-  await runOmarchyTool("omarchy_command", { route: "system lock", confirmed: true }, deps);
-  assert.deepEqual(calls.at(-1)?.argv, ["system", "lock"]);
+  for (const route of confirmations) {
+    await runOmarchyTool("omarchy_command", { route, confirmed: true }, deps);
+  }
 });
 
 test("omarchy_command validates argv before loading or executing a route", async () => {
-  const { deps, calls } = fakeDeps([{ route: "omarchy update available" }]);
+  const { deps, calls } = fakeDeps([catalogCommand("update available")]);
   await rejectsWithCode(
     runOmarchyTool("omarchy_command", { route: "update available", args: ["--json", 2] }, deps),
     "bad_args",
@@ -135,17 +143,47 @@ test("omarchy_command validates argv before loading or executing a route", async
   assert.equal(calls.length, 0);
 });
 
-test("omarchy_help resolves only known routes and caps command output", async () => {
-  const { deps, calls } = fakeDeps([{ route: "omarchy theme list" }], "x".repeat(5_000));
-  const output = await runOmarchyTool("omarchy_help", { route: "theme list" }, deps);
+test("omarchy_help discovers even denied routes without running them and caps output", async () => {
+  const { deps, calls } = fakeDeps([catalogCommand("launch terminal")], "x".repeat(5_000));
+  const output = await runOmarchyTool("omarchy_help", { route: "launch terminal" }, deps);
   assert.ok(output.length < 4_100);
   assert.match(output, /\[truncated\]$/);
   assert.deepEqual(calls.at(-1), {
     file: "omarchy",
-    argv: ["theme", "list", "--help"],
+    argv: ["launch", "terminal", "--help"],
     timeoutMs: 15_000,
   });
   await rejectsWithCode(runOmarchyTool("omarchy_help", { route: "not real" }, deps), "bad_args");
+});
+
+test("omarchy_status returns partial results within its whole-operation deadline", async () => {
+  const calls: Call[] = [];
+  const deps: OmarchyToolDeps = {
+    home: "/home/test",
+    async exec(file, argv, { timeoutMs }) {
+      calls.push({ file, argv, timeoutMs });
+      if (file === "omarchy" && argv.join(" ") === "theme current") {
+        return { stdout: "Tokyo Night", stderr: "" };
+      }
+      return new Promise(() => undefined);
+    },
+  };
+
+  const started = Date.now();
+  const output = await runOmarchyTool("omarchy_status", {}, deps);
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 1_600, `status took ${elapsed} ms`);
+  assert.match(output, /^Theme: Tokyo Night;/);
+  assert.match(output, /unavailable/);
+  assert.equal(calls.length, 10);
+});
+
+test("omarchy_status caps its final assembled output", async () => {
+  const { deps } = fakeDeps([], "x".repeat(5_000));
+  const output = await runOmarchyTool("omarchy_status", {}, deps);
+  assert.ok(output.length < 4_100);
+  assert.match(output, /\[truncated\]$/);
 });
 
 test("Hyprland option tools validate dotted keys and safely encode typed values", async () => {

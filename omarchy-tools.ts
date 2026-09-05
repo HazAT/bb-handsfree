@@ -4,6 +4,7 @@ import { basename, delimiter, isAbsolute, resolve, sep } from "node:path";
 
 const QUICK_TIMEOUT_MS = 5_000;
 const ROUTE_TIMEOUT_MS = 15_000;
+const STATUS_DEADLINE_MS = 1_500;
 const OUTPUT_LIMIT = 4_000;
 const MAX_ARG_LENGTH = 2_000;
 
@@ -259,8 +260,12 @@ async function execute(
   }
 }
 
-function resultValue(result: PromiseSettledResult<string>, fallback = "unavailable"): string {
-  return result.status === "fulfilled" ? result.value.trim() || fallback : fallback;
+async function beforeDeadline<T>(pending: Promise<T>, deadline: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const expired = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), Math.max(0, deadline - Date.now()));
+  });
+  return Promise.race([pending.catch(() => fallback), expired]).finally(() => clearTimeout(timer));
 }
 
 async function flagExists(path: string): Promise<boolean> {
@@ -300,36 +305,37 @@ async function toggleStatus(flag: string, deps: OmarchyToolDeps): Promise<boolea
 }
 
 async function runStatus(deps: OmarchyToolDeps): Promise<string> {
-  const commands = await Promise.allSettled([
-    execute(deps, "omarchy", ["theme", "current"]),
-    execute(deps, "omarchy", ["theme", "bg", "current"]),
-    execute(deps, "omarchy", ["hyprland", "monitor", "focused"]),
-    execute(deps, "upower", ["-i", "/org/freedesktop/UPower/devices/DisplayDevice"]),
-    execute(deps, "nmcli", ["-t", "-f", "STATE,CONNECTIVITY", "general"]),
-    execute(deps, "wpctl", ["get-volume", "@DEFAULT_AUDIO_SINK@"]),
-    execute(deps, "omarchy", ["version"]),
-    execute(deps, "hostname", []),
-    toggleStatus("nightlight", deps).then((on) => (on ? "on" : "off")),
-    toggleStatus("notification-silencing", deps).then((on) => (on ? "on" : "off")),
+  const deadline = Date.now() + STATUS_DEADLINE_MS;
+  const status = (pending: Promise<string>) => beforeDeadline(pending, deadline, "unavailable");
+  const [theme, backgroundRaw, monitor, batteryRaw, network, volumeRaw, version, host, nightlight, notifications, idle, bar, touchpad, touchscreen, screensaver] = await Promise.all([
+    status(execute(deps, "omarchy", ["theme", "current"])),
+    status(execute(deps, "omarchy", ["theme", "bg", "current"])),
+    status(execute(deps, "omarchy", ["hyprland", "monitor", "focused"])),
+    status(execute(deps, "upower", ["-i", "/org/freedesktop/UPower/devices/DisplayDevice"])),
+    status(execute(deps, "nmcli", ["-t", "-f", "STATE,CONNECTIVITY", "general"])),
+    status(execute(deps, "wpctl", ["get-volume", "@DEFAULT_AUDIO_SINK@"])),
+    status(execute(deps, "omarchy", ["version"])),
+    status(execute(deps, "hostname", [])),
+    status(toggleStatus("nightlight", deps).then((on) => (on ? "on" : "off"))),
+    status(toggleStatus("notification-silencing", deps).then((on) => (on ? "on" : "off"))),
+    status(toggleStatus("idle", deps).then((on) => (on ? "on" : "off"))),
+    status(toggleStatus("bar", deps).then((on) => (on ? "on" : "off"))),
+    status(toggleStatus("touchpad", deps).then((on) => (on ? "on" : "off"))),
+    status(toggleStatus("touchscreen", deps).then((on) => (on ? "on" : "off"))),
+    status(toggleStatus("screensaver", deps).then((on) => (on ? "on" : "off"))),
   ]);
-  const batteryRaw = resultValue(commands[3]);
   const batteryPercent = batteryRaw.match(/percentage:\s*([^\n]+)/i)?.[1]?.trim();
   const batteryState = batteryRaw.match(/state:\s*([^\n]+)/i)?.[1]?.trim();
-  const volumeRaw = resultValue(commands[5]);
   const volumeNumber = Number(volumeRaw.match(/Volume:\s*([0-9.]+)/i)?.[1]);
   const volume = Number.isFinite(volumeNumber) ? `${Math.round(volumeNumber * 100)}%` : "unavailable";
   const muted = /\[MUTED\]/i.test(volumeRaw) ? "muted" : "unmuted";
-  const [idle, bar, touchpad, touchscreen, screensaver] = await Promise.all(
-    ["idle", "bar", "touchpad", "touchscreen", "screensaver"].map((flag) => toggleStatus(flag, deps)),
-  );
-  const backgroundRaw = resultValue(commands[1]);
   const background = backgroundRaw === "unavailable" ? backgroundRaw : basename(backgroundRaw);
-  return [
-    `Theme: ${resultValue(commands[0])}; background: ${background}; monitor: ${resultValue(commands[2])}.`,
-    `Battery: ${batteryPercent ?? "unavailable"}${batteryState ? ` (${batteryState})` : ""}; network: ${resultValue(commands[4])}; volume: ${volume} (${muted}).`,
-    `Toggles: nightlight ${resultValue(commands[8])}, idle ${idle ? "on" : "off"}, notification silencing ${resultValue(commands[9])}, bar ${bar ? "on" : "off"}, touchpad ${touchpad ? "on" : "off"}, touchscreen ${touchscreen ? "on" : "off"}, screensaver ${screensaver ? "on" : "off"}.`,
-    `Omarchy: ${resultValue(commands[6])}; host: ${resultValue(commands[7])}.`,
-  ].join("\n");
+  return capped([
+    `Theme: ${theme}; background: ${background}; monitor: ${monitor}.`,
+    `Battery: ${batteryPercent ?? "unavailable"}${batteryState ? ` (${batteryState})` : ""}; network: ${network}; volume: ${volume} (${muted}).`,
+    `Toggles: nightlight ${nightlight}, idle ${idle}, notification silencing ${notifications}, bar ${bar}, touchpad ${touchpad}, touchscreen ${touchscreen}, screensaver ${screensaver}.`,
+    `Omarchy: ${version}; host: ${host}.`,
+  ].join("\n"));
 }
 
 const OPTION_KEY = /^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*)+$/;
@@ -400,13 +406,26 @@ function routeStarts(route: string, prefix: string): boolean {
   return route === prefix || route.startsWith(`${prefix} `);
 }
 
+const ALLOWED_ROUTE_PREFIXES = [
+  "theme", "toggle", "audio", "brightness", "battery", "bluetooth", "font",
+  "network status", "network speedtest", "network qr", "hyprland", "capture",
+  "notification", "osd", "reminder", "weather", "powerprofiles list",
+  "powerprofiles set", "system lock", "system wake", "system stats",
+  "update available", "update status", "version", "menu", "screensaver",
+  "voxtype status", "agent usage", "launch browser", "launch webapp",
+  "launch editor", "launch config editor", "launch about", "launch screensaver",
+  "launch nautilus", "launch spotify", "launch signal", "launch 1password",
+  "launch discord community",
+];
+
+const BLOCKED_ROUTE_PREFIXES = [
+  "theme remove", "theme install", "theme update", "hyprland toggle",
+  "hyprland window close all",
+];
+
 function deniedRoute(route: string): boolean {
-  if (routeStarts(route, "system") && !["system lock", "system wake", "system stats"].some((ok) => routeStarts(route, ok))) return true;
-  if (routeStarts(route, "update") && !["update available", "update status"].some((ok) => routeStarts(route, ok))) return true;
-  const prefixes = [
-    "install", "remove", "pkg", "reinstall", "setup", "provision", "migrate", "hibernation", "drive", "dev", "channel", "upgrade", "snapshot", "factory", "tui remove", "webapp remove", "plugin add", "plugin remove", "theme remove", "theme install", "theme update", "hyprland window close all", "refresh pacman", "sudo",
-  ];
-  return prefixes.some((prefix) => routeStarts(route, prefix));
+  if (BLOCKED_ROUTE_PREFIXES.some((prefix) => routeStarts(route, prefix))) return true;
+  return !ALLOWED_ROUTE_PREFIXES.some((prefix) => routeStarts(route, prefix));
 }
 
 function confirmationRequired(route: string): boolean {

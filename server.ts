@@ -1191,30 +1191,45 @@ export default async function plugin(bb: BbPluginApi) {
         const argv = Array.isArray(args.argv)
           ? (args.argv as unknown[]).filter((v): v is string => typeof v === "string")
           : [];
-        const response = await fetch(
-          `${bb.server.loopbackBaseUrl}/api/v1/plugins/${encodeURIComponent(command.id)}/cli`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              argv,
-              ...(context.threadId ? { threadId: context.threadId } : {}),
-              ...(context.projectId ? { projectId: context.projectId } : {}),
-            }),
-          },
-        );
+        let response: Response;
+        try {
+          response = await fetch(
+            `${bb.server.loopbackBaseUrl}/api/v1/plugins/${encodeURIComponent(command.id)}/cli`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                argv,
+                ...(context.threadId ? { threadId: context.threadId } : {}),
+                ...(context.projectId ? { projectId: context.projectId } : {}),
+              }),
+            },
+          );
+        } catch (cause) {
+          const reason = cause instanceof Error ? cause.message : String(cause);
+          throw new ToolRunError("exec_failed", `Error running bb ${command.name}: ${reason}`);
+        }
         const result = (await response.json().catch(() => null)) as {
           exitCode?: number;
           stdout?: string;
           stderr?: string;
           error?: string;
         } | null;
-        if (!response.ok || result === null) {
-          return `Error running bb ${command.name}: HTTP ${response.status}${result?.error ? ` — ${result.error}` : ""}`;
+        if (!response.ok) {
+          throw new ToolRunError(
+            "exec_failed",
+            `Error running bb ${command.name}: HTTP ${response.status}${result?.error ? ` — ${result.error}` : ""}`,
+          );
+        }
+        if (result === null) {
+          throw new ToolRunError("exec_failed", `Error running bb ${command.name}: invalid response.`);
         }
         const out = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
         if (result.exitCode !== 0) {
-          return truncate(`bb ${command.name} ${argv.join(" ")} failed (exit ${result.exitCode ?? "?"}):\n${out || "(no output)"}`);
+          throw new ToolRunError(
+            "exec_failed",
+            truncate(`bb ${command.name} ${argv.join(" ")} failed (exit ${result.exitCode ?? "?"}):\n${out || "(no output)"}`),
+          );
         }
         return truncate(out || "(no output)");
       }
