@@ -1,12 +1,8 @@
 import { toast } from "sonner";
-import type { useRpc } from "@get-bb/plugin-sdk/app";
-import type { rpcContract } from "./server";
 import { chunkSpeechText, prepareSpeechText } from "./speak-text.ts";
 import { waitForIceGathering } from "./voice-agent";
 
-interface RpcClient {
-  call: ReturnType<typeof useRpc<typeof rpcContract>>["call"];
-}
+const SPEAK_TOAST_ID = "speak";
 
 interface SpeakSession {
   key: string;
@@ -17,15 +13,37 @@ interface SpeakSession {
   nextChunk: number;
   waitingForResponse: boolean;
   finalResponseDone: boolean;
+  playing: boolean;
   connectTimer: ReturnType<typeof setTimeout>;
 }
 
 class Speaker {
-  private rpc: RpcClient | null = null;
+  private pluginId: string | null = null;
   private session: SpeakSession | null = null;
 
-  bind(rpc: RpcClient) {
-    this.rpc = rpc;
+  configure({ pluginId }: { pluginId: string }) {
+    this.pluginId = pluginId;
+  }
+
+  // Message actions have no React context, so this singleton cannot use useRpc
+  // and calls the SDK's documented same-origin RPC endpoint directly.
+  private async call(method: "createSpeakCall", input: { sdp: string }): Promise<{ sdp: string }> {
+    const response = await fetch(
+      `/api/v1/plugins/${encodeURIComponent(this.pluginId!)}/rpc/${encodeURIComponent(method)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    const envelope = (await response.json().catch(() => null)) as
+      | { ok: true; result: { sdp: string } }
+      | { ok: false; error: { message: string; code: string } }
+      | null;
+    if (envelope?.ok === false) throw new Error(envelope.error.message);
+    if (!response.ok) throw new Error(`RPC failed: ${response.status} ${response.statusText}`);
+    if (envelope?.ok !== true) throw new Error("Invalid RPC response");
+    return envelope.result;
   }
 
   toggle({ key, text }: { key: string; text: string }) {
@@ -37,11 +55,12 @@ class Speaker {
 
     const chunks = chunkSpeechText(prepareSpeechText(text));
     if (chunks.length === 0) return;
-    if (!this.rpc) {
+    if (!this.pluginId) {
       toast.error("Speak: not ready — please try again");
       return;
     }
 
+    toast.loading("Speak: connecting…", { id: SPEAK_TOAST_ID, duration: Infinity });
     let audio: HTMLAudioElement | null = null;
     try {
       // Create and attach playback synchronously in the user gesture so iOS
@@ -67,15 +86,17 @@ class Speaker {
         nextChunk: 0,
         waitingForResponse: false,
         finalResponseDone: false,
+        playing: false,
         connectTimer: setTimeout(() => {
           if (this.session === session) this.fail(session, "couldn't connect — please try again");
         }, 15_000),
       };
       this.session = session;
       this.attach(session);
-      void this.connect(session, this.rpc);
+      void this.connect(session);
     } catch (error) {
       audio?.remove();
+      toast.dismiss(SPEAK_TOAST_ID);
       toast.error(`Speak: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -84,6 +105,7 @@ class Speaker {
     const session = this.session;
     if (!session) return;
     this.session = null;
+    toast.dismiss(SPEAK_TOAST_ID);
     clearTimeout(session.connectTimer);
     session.dc.close();
     session.pc.close();
@@ -136,7 +158,17 @@ class Speaker {
         return;
       }
       const type = String(event.type ?? "");
-      if (type === "response.done") {
+      if (
+        !session.playing &&
+        (type === "output_audio_buffer.started" || type === "response.output_audio_transcript.delta")
+      ) {
+        session.playing = true;
+        toast("Speak: playing", {
+          id: SPEAK_TOAST_ID,
+          duration: Infinity,
+          action: { label: "Stop", onClick: () => this.stop() },
+        });
+      } else if (type === "response.done") {
         if (!session.waitingForResponse) return;
         const response = event.response as {
           status?: unknown;
@@ -187,14 +219,14 @@ class Speaker {
     );
   }
 
-  private async connect(session: SpeakSession, rpc: RpcClient) {
+  private async connect(session: SpeakSession) {
     try {
       const offer = await session.pc.createOffer();
       await session.pc.setLocalDescription(offer);
       await waitForIceGathering(session.pc);
       const localSdp = session.pc.localDescription?.sdp;
       if (!localSdp) throw new Error("No local SDP offer");
-      const { sdp } = await rpc.call("createSpeakCall", { sdp: localSdp });
+      const { sdp } = await this.call("createSpeakCall", { sdp: localSdp });
       if (this.session !== session) return;
       await session.pc.setRemoteDescription({ type: "answer", sdp });
     } catch (error) {

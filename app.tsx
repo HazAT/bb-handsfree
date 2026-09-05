@@ -95,7 +95,6 @@ function AideVoiceButton() {
   // new composer's button mounts and rebinds, so "this thread" and composer
   // edits follow the user while the call keeps running.
   useEffect(() => {
-    speaker.bind(rpc);
     voiceAgent.bind({
       rpc,
       context: { threadId, projectId: effectiveProjectId, onNewThreadScreen },
@@ -402,7 +401,8 @@ export default definePluginApp((app) => {
   // would otherwise keep a zombie WebRTC call no button controls.
   app.contentScripts.register({
     id: "aide-voice-lifecycle",
-    mount({ signal }) {
+    mount({ pluginId, signal }) {
+      speaker.configure({ pluginId });
       window.addEventListener("storage", (event) => {
         if (event.key === AUDIO_DEVICE_STORAGE_KEY) voiceAgent.refreshAudioPreferences();
         if (event.key === SHORTCUT_STORAGE_KEY) shortcutStore.refresh();
