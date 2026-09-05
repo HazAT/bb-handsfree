@@ -255,6 +255,44 @@ test("runTool records successful calls and classifies bad arguments and unknown 
   ]);
 });
 
+test("start CLI publishes a fresh request, exactly one realm claims it, and live presence refuses another", async () => {
+  const { host } = await load();
+
+  const first = await host.harness.runCli(["start"]);
+  assert.equal(first.exitCode, 0);
+  assert.match(first.stdout, /Start signal broadcast/);
+  const startSignals = () =>
+    host.harness.realtimeSignals.filter((entry) => entry.channel === "voice-start");
+  assert.equal(startSignals().length, 1);
+  const nonce = (startSignals()[0].payload as { nonce: string }).nonce;
+  assert.match(nonce, /^[0-9a-f-]{36}$/);
+
+  const claims = await Promise.all(
+    Array.from({ length: 5 }, () => host.harness.callRpc("claimStart", { nonce })),
+  ) as { claimed: boolean }[];
+  assert.equal(claims.filter(({ claimed }) => claimed).length, 1);
+
+  await host.harness.callRpc("publishPresence", {
+    nonce: "live-call",
+    phase: "live",
+    startedAt: Date.now(),
+  });
+  const refused = await host.harness.runCli(["start"]);
+  assert.equal(refused.exitCode, 1);
+  assert.match(refused.stderr, /already live/);
+  assert.equal(startSignals().length, 1);
+
+  await host.harness.callRpc("publishPresence", {
+    nonce: "live-call",
+    phase: "idle",
+    startedAt: null,
+  });
+  const afterStop = await host.harness.runCli(["start"]);
+  assert.equal(afterStop.exitCode, 0);
+  assert.equal(startSignals().length, 2);
+  assert.notEqual((startSignals()[1].payload as { nonce: string }).nonce, nonce);
+});
+
 test("tools CLI aggregates calls, error rates, median, p90, and error classes", async () => {
   const { host } = await load();
   const insert = host.bb.storage

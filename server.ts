@@ -5,6 +5,7 @@
 // the OpenAI Realtime API, and executes the voice agent's tools against the
 // bb SDK (threads, projects, diffs, panes).
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -201,6 +202,11 @@ export const rpcContract = defineRpcContract({
         subscriptionAvailable: z.boolean(),
       })
       .strict(),
+  },
+  /** Claim a CLI start request. Exactly one mounted composer realm may win. */
+  claimStart: {
+    input: z.object({ nonce: z.string().min(1) }).strict(),
+    output: z.object({ claimed: z.boolean() }).strict(),
   },
   /** Append one event to a voice session's transcript log. */
   logEvent: {
@@ -617,6 +623,48 @@ export default async function plugin(bb: BbPluginApi) {
     shortcuts: Shortcuts;
   }
   const CONFIG_KEY = "config";
+  const ACTIVE_CALL_KEY = "voice.activeCall";
+  const START_REQUEST_KEY = "voice.startRequest";
+  const ACTIVE_CALL_STALE_MS = 25_000;
+  type ActiveCall = {
+    nonce: string;
+    phase: "connecting" | "live" | "muted";
+    updatedAt: number;
+  };
+  type StartRequest = { nonce: string; claimed: boolean; requestedAt: number };
+
+  async function activeCall(): Promise<ActiveCall | null> {
+    const active = await bb.storage.kv.get<ActiveCall>(ACTIVE_CALL_KEY);
+    if (
+      !active ||
+      typeof active.nonce !== "string" ||
+      (active.phase !== "connecting" && active.phase !== "live" && active.phase !== "muted") ||
+      typeof active.updatedAt !== "number"
+    ) return null;
+    if (Date.now() - active.updatedAt <= ACTIVE_CALL_STALE_MS) return active;
+    await bb.storage.kv.delete(ACTIVE_CALL_KEY);
+    return null;
+  }
+
+  async function clearActiveCall(nonce: string) {
+    const active = await bb.storage.kv.get<ActiveCall>(ACTIVE_CALL_KEY);
+    if (active?.nonce === nonce) await bb.storage.kv.delete(ACTIVE_CALL_KEY);
+  }
+
+  // RPC handlers can overlap at awaits. Serialize claims so two composer realms
+  // cannot both read the same unclaimed kv value before either writes it.
+  let claimQueue: Promise<void> = Promise.resolve();
+  function claimStart(nonce: string): Promise<boolean> {
+    const claim = claimQueue.then(async () => {
+      const request = await bb.storage.kv.get<StartRequest>(START_REQUEST_KEY);
+      if (!request || request.nonce !== nonce || request.claimed) return false;
+      await bb.storage.kv.set(START_REQUEST_KEY, { ...request, claimed: true });
+      return true;
+    });
+    claimQueue = claim.then(() => undefined, () => undefined);
+    return claim;
+  }
+
   const CONFIG_DEFAULTS: VoiceConfig = {
     model: DEFAULT_MODEL,
     voice: DEFAULT_VOICE,
@@ -1268,6 +1316,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "read", summary: "Read a thread's status and latest assistant output.", usage: "bb handsfree read <thread-id>" },
       { name: "usage", summary: "Voice-session token usage and estimated cost, grouped per day. Add --json for machine output, --days N to limit the window.", usage: "bb handsfree usage [--days N] [--json]" },
       { name: "tools", summary: "Tool calls, errors, and latency. Add --json for machine output, --days N to limit the window.", usage: "bb handsfree tools [--days N] [--json]" },
+      { name: "start", summary: "Start an Aide voice session in a bb window with a mounted composer.", usage: "bb handsfree start" },
       { name: "stop", summary: "Stop any active Aide voice session in any bb window.", usage: "bb handsfree stop" },
       { name: "mute", summary: "Mute the active voice session's microphone (call stays up).", usage: "bb handsfree mute" },
       { name: "unmute", summary: "Unmute the active voice session's microphone.", usage: "bb handsfree unmute" },
@@ -1282,6 +1331,7 @@ export default async function plugin(bb: BbPluginApi) {
         "  bb handsfree read <thread-id>         thread status + latest assistant output",
         "  bb handsfree usage [--days N] [--json] voice-session tokens and estimated cost",
         "  bb handsfree tools [--days N] [--json] tool calls, errors, and latency",
+        "  bb handsfree start                    start a voice session in an open bb window",
         "  bb handsfree stop                     stop any active voice session",
         "  bb handsfree mute | unmute            mute/unmute the active session's mic",
       ].join("\n");
@@ -1292,6 +1342,16 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "mute" || command === "unmute") {
           bb.realtime.publish("voice-mute", { muted: command === "mute" });
           return { exitCode: 0, stdout: `${command === "mute" ? "Mute" : "Unmute"} signal broadcast.` };
+        }
+        if (command === "start") {
+          const active = await activeCall();
+          if (active) {
+            return { exitCode: 1, stderr: `Aide voice session ${active.nonce} is already ${active.phase}.` };
+          }
+          const nonce = randomUUID();
+          await bb.storage.kv.set(START_REQUEST_KEY, { nonce, claimed: false, requestedAt: Date.now() });
+          bb.realtime.publish("voice-start", { nonce });
+          return { exitCode: 0, stdout: "Start signal broadcast to an open bb composer." };
         }
         if (command === "stop") {
           // Every mounted voice button listens on this channel and stops any
@@ -1568,6 +1628,9 @@ export default async function plugin(bb: BbPluginApi) {
           : keySource ?? (subscriptionAvailable ? ("subscription" as const) : ("none" as const));
       return { effective, preference, hasApiKey, envKeyPresent, subscriptionAvailable };
     },
+    async claimStart({ nonce }) {
+      return { claimed: await claimStart(nonce) };
+    },
     async logEvent({ sessionId, kind, payload }) {
       db.prepare(
         "INSERT INTO session_events (session_id, ts, kind, payload) VALUES (?, ?, ?, ?)",
@@ -1589,6 +1652,8 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     async publishPresence({ nonce, phase, startedAt, client, realm }) {
+      if (phase === "idle") await clearActiveCall(nonce);
+      else await bb.storage.kv.set(ACTIVE_CALL_KEY, { nonce, phase, updatedAt: Date.now() });
       bb.realtime.publish("voice-presence", { nonce, phase, startedAt, client, realm });
       return { ok: true as const };
     },
@@ -1601,6 +1666,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     async forceStop({ nonce }) {
+      await clearActiveCall(nonce);
       // Durable end-marker so listSessions stops showing it live even if the
       // owner realm never logs its own session.stopped (count > 0 is enough).
       db.prepare(

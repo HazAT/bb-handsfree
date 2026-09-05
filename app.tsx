@@ -57,6 +57,13 @@ function AideVoiceButton() {
     if (typeof nonce === "string") voiceAgent.onCallStarted(nonce);
   });
 
+  // CLI start control. This hook only exists while a composer button is
+  // mounted; the server-side claim lets exactly one such realm open WebRTC.
+  useRealtime("voice-start", (payload) => {
+    const nonce = (payload as { nonce?: unknown } | null)?.nonce;
+    if (typeof nonce === "string") void voiceAgent.startFromOutside(nonce);
+  });
+
   // CLI mute control: bb handsfree mute|unmute broadcasts on this channel.
   useRealtime("voice-mute", (payload) => {
     const muted = (payload as { muted?: unknown } | null)?.muted;
