@@ -182,7 +182,7 @@ test("names every thread in a multi-thread digest so 'it finished' is never ambi
   assert.match(instruction, /every announcement must name its thread: start with the title/);
   assert.match(instruction, /"<title> finished: <summary>" or "<title> failed: <summary>"/);
   assert.match(instruction, /Never say just "it finished"/);
-  assert.match(instruction, /one short sentence per update/);
+  assert.match(instruction, /A few short sentences per update at most/);
 });
 
 test("requires reading the thread when a completion has no result", () => {
