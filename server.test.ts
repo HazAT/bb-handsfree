@@ -11,20 +11,13 @@ const CONTEXT = { threadId: null, projectId: PROJECT, onNewThreadScreen: false }
 const ASSISTANT = "Aide's assistant";
 const ASSISTANT_KEY = "assistant.global";
 
-interface PluginCommandFixture {
-  id: string;
-  enabled: boolean;
-  status: "running";
-  cliCommand: { name: string; summary: string };
-}
-
 /**
  * The backend loaded into the SDK's fake plugin host, with just enough of
  * bb.sdk stubbed for delegation. Threads live in a map so a test can archive
  * or delete the assistant between calls and watch it get replaced. `seedKv`
  * runs before the plugin factory, to stage pre-upgrade state for migrations.
  */
-async function load(options: { seedKv?: Record<string, unknown>; plugins?: PluginCommandFixture[] } = {}) {
+async function load(options: { seedKv?: Record<string, unknown> } = {}) {
   const threads = new Map<string, Thread>();
   let spawned = 0;
   const host = createFakePluginHost({
@@ -33,7 +26,7 @@ async function load(options: { seedKv?: Record<string, unknown>; plugins?: Plugi
     sdk: {
       plugins: {
         getSettings: async () => ({ values: {} }),
-        list: async () => ({ plugins: options.plugins ?? [] }),
+        list: async () => ({ plugins: [] }),
       },
       projects: {
         list: async () => [
@@ -180,55 +173,8 @@ test("the voice session is briefed on delegation, and the tool is sent, only whi
   }
 });
 
-test("Omarchy tools and Omar's desktop brief are included only while the setting is on", async () => {
-  const { host, toolNames } = await load();
-  const sessions: { instructions: string; tools: { name: string }[] }[] = [];
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-    sessions.push(JSON.parse(String((init?.body as FormData).get("session"))));
-    return new Response("v=0 answer", { status: 200 });
-  }) as typeof fetch;
-  try {
-    await host.harness.callRpc("setConfig", { omarchyTools: false });
-    assert.ok(!(await toolNames()).includes("omarchy_status"));
-    const disabled = (await host.harness.callRpc("runTool", {
-      name: "omarchy_status",
-      args: {},
-      ...CONTEXT,
-    })) as { output: string };
-    assert.match(disabled.output, /turned off/);
-    await host.harness.callRpc("createCall", {
-      sdp: "v=0 offer",
-      threadId: null,
-      projectId: PROJECT,
-      nonce: "omarchy-off",
-    });
-    assert.doesNotMatch(sessions[0].instructions, /you go by Omar/);
-    assert.ok(!sessions[0].tools.some((tool) => tool.name === "omarchy_status"));
-
-    const config = (await host.harness.callRpc("setConfig", { omarchyTools: true })) as {
-      omarchyTools: boolean;
-    };
-    assert.equal(config.omarchyTools, true);
-    assert.ok((await toolNames()).includes("omarchy_status"));
-    assert.ok((await toolNames()).includes("read_config_file"));
-    await host.harness.callRpc("createCall", {
-      sdp: "v=0 offer",
-      threadId: null,
-      projectId: PROJECT,
-      nonce: "omarchy-on",
-    });
-    assert.match(sessions[1].instructions, /you go by Omar and introduce yourself as Omar/);
-    assert.match(sessions[1].instructions, /omarchy_help before omarchy_command/);
-    assert.ok(sessions[1].tools.some((tool) => tool.name === "hyprland_set_option"));
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
 test("runTool records successful calls and classifies bad arguments and unknown tools", async () => {
   const { host } = await load();
-  await host.harness.callRpc("setConfig", { omarchyTools: true });
 
   await host.harness.callRpc("runTool", {
     name: "get_context",
@@ -237,12 +183,12 @@ test("runTool records successful calls and classifies bad arguments and unknown 
     sessionId: "call-telemetry",
   });
   const invalid = (await host.harness.callRpc("runTool", {
-    name: "omarchy_theme",
-    args: { action: "invalid" },
+    name: "read_thread",
+    args: {},
     ...CONTEXT,
     sessionId: "call-telemetry",
   })) as { output: string };
-  assert.match(invalid.output, /^Tool error: Invalid arguments:/);
+  assert.equal(invalid.output, "Tool error: Missing argument: thread_id");
   const unknown = (await host.harness.callRpc("runTool", {
     name: "not_a_tool",
     args: {},
@@ -257,83 +203,9 @@ test("runTool records successful calls and classifies bad arguments and unknown 
     .all() as { session_id: string; tool: string; ok: number; error: string | null }[];
   assert.deepEqual(rows, [
     { session_id: "call-telemetry", tool: "get_context", ok: 1, error: null },
-    { session_id: "call-telemetry", tool: "omarchy_theme", ok: 0, error: "bad_args" },
+    { session_id: "call-telemetry", tool: "read_thread", ok: 0, error: "bad_args" },
     { session_id: "call-telemetry", tool: "not_a_tool", ok: 0, error: "unknown_tool" },
   ]);
-});
-
-test("run_plugin_command reports nonzero exits as exec_failed telemetry", async () => {
-  const { host } = await load({
-    plugins: [
-      {
-        id: "sample-plugin",
-        enabled: true,
-        status: "running",
-        cliCommand: { name: "sample", summary: "Sample command" },
-      },
-    ],
-  });
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify({ exitCode: 7, stdout: "", stderr: "bad flag" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    })) as typeof fetch;
-  try {
-    const result = (await host.harness.callRpc("runTool", {
-      name: "run_plugin_command",
-      args: { plugin_id: "sample-plugin", argv: ["bad"] },
-      ...CONTEXT,
-      sessionId: "plugin-failure",
-    })) as { output: string };
-    assert.equal(result.output, "Tool error: bb sample bad failed (exit 7):\nbad flag");
-
-    const row = host.bb.storage
-      .database()
-      .prepare("SELECT ok, error FROM tool_events WHERE session_id = ?")
-      .get("plugin-failure") as { ok: number; error: string };
-    assert.deepEqual(row, { ok: 0, error: "exec_failed" });
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test("start CLI publishes a fresh request, exactly one realm claims it, and live presence refuses another", async () => {
-  const { host } = await load();
-
-  const first = await host.harness.runCli(["start"]);
-  assert.equal(first.exitCode, 0);
-  assert.match(first.stdout, /Start signal broadcast/);
-  const startSignals = () =>
-    host.harness.realtimeSignals.filter((entry) => entry.channel === "voice-start");
-  assert.equal(startSignals().length, 1);
-  const nonce = (startSignals()[0].payload as { nonce: string }).nonce;
-  assert.match(nonce, /^[0-9a-f-]{36}$/);
-
-  const claims = await Promise.all(
-    Array.from({ length: 5 }, () => host.harness.callRpc("claimStart", { nonce })),
-  ) as { claimed: boolean }[];
-  assert.equal(claims.filter(({ claimed }) => claimed).length, 1);
-
-  await host.harness.callRpc("publishPresence", {
-    nonce: "live-call",
-    phase: "live",
-    startedAt: Date.now(),
-  });
-  const refused = await host.harness.runCli(["start"]);
-  assert.equal(refused.exitCode, 1);
-  assert.match(refused.stderr, /already live/);
-  assert.equal(startSignals().length, 1);
-
-  await host.harness.callRpc("publishPresence", {
-    nonce: "live-call",
-    phase: "idle",
-    startedAt: null,
-  });
-  const afterStop = await host.harness.runCli(["start"]);
-  assert.equal(afterStop.exitCode, 0);
-  assert.equal(startSignals().length, 2);
-  assert.notEqual((startSignals()[1].payload as { nonce: string }).nonce, nonce);
 });
 
 test("tools CLI aggregates calls, error rates, median, p90, and error classes", async () => {

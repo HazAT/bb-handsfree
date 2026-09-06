@@ -528,24 +528,6 @@ export class VoiceAgent {
 
   // ---- surface controls: act on the local call, or relay to the owner ----
 
-  /**
-   * Handle `bb handsfree start` in a composer realm. A surface that does not
-   * currently own a call claims the request server-side; only the winner opens
-   * WebRTC. The composer check keeps fallback/page realms from taking the mic.
-   */
-  async startFromOutside(nonce: string): Promise<boolean> {
-    const bindings = this.bindings;
-    if (!nonce || this.hasLocalCall() || !bindings?.composer) return false;
-    try {
-      const { claimed } = await bindings.rpc.call("claimStart", { nonce });
-      if (!claimed || this.hasLocalCall() || this.bindings !== bindings) return false;
-      void this.start();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /** Start/stop from any surface. A mirrored remote call is stopped, not toggled. */
   toggleFromSurface() {
     if (this.hasLocalCall()) return this.toggle();
@@ -1147,25 +1129,18 @@ export class VoiceAgent {
       pc.ontrack = (event) => {
         if (this.session?.pc !== pc) return; // torn down mid-negotiation
         audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-        // Never swallow a real playback failure ("live" but silent). Record the
-        // attempt and exact rejection so CLI-triggered autoplay policy failures
-        // are visible in session diagnostics without needing browser devtools.
-        this.logDiag("audio.play.attempt", {
-          autoplay: audio.autoplay,
-          userActivation: navigator.userActivation?.isActive ?? null,
-        });
+        // Never swallow a real playback failure ("live" but silent). But a
+        // play() aborted because the session was torn down (srcObject cleared,
+        // element removed) is not a speaker fault — log it, don't cry wolf.
         void audio.play().then(
           () => this.logDiag("audio.play.ok"),
           (error) => {
             const name = error instanceof Error ? error.name : "unknown";
-            const message = error instanceof Error ? error.message : String(error);
-            // A play() aborted because the session was torn down (srcObject
-            // cleared, element removed) is not a speaker fault.
             if (name === "AbortError" || this.session?.pc !== pc) {
-              this.logDiag("audio.play.aborted", { name, message });
+              this.logDiag("audio.play.aborted", { name });
               return;
             }
-            this.logDiag("audio.play.failed", { name, message });
+            this.logDiag("audio.play.failed", { name });
             toast.error("Aide: can't play audio — check the speaker in Handsfree settings");
           },
         );

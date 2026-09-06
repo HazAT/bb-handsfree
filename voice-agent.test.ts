@@ -111,59 +111,6 @@ test("a relayed command is ignored by a realm that doesn't own that call", () =>
   assert.equal(calls.length, 0);
 });
 
-test("an outside start is ignored without a mounted composer", async () => {
-  const { agent, calls } = agentWithRpcSpy();
-  assert.equal(await agent.startFromOutside("cli-start"), false);
-  assert.equal(calls.length, 0);
-  assert.equal(agent.getState(), "idle");
-});
-
-test("an outside start claims through the server and obeys a denied claim", async () => {
-  const calls: { method: string; args: unknown }[] = [];
-  const agent = new VoiceAgent();
-  agent.bind({
-    rpc: {
-      call: (async (method: string, args: unknown) => {
-        calls.push({ method, args });
-        if (method === "claimStart") return { claimed: false };
-        return { ok: true };
-      }) as never,
-    },
-    context: { threadId: null, projectId: null, onNewThreadScreen: false },
-    composer: { setText() {}, updateText() {} },
-    openNewThread() {},
-  });
-  calls.length = 0;
-
-  assert.equal(await agent.startFromOutside("cli-start"), false);
-  assert.deepEqual(calls, [{ method: "claimStart", args: { nonce: "cli-start" } }]);
-  assert.equal(agent.getState(), "idle");
-});
-
-test("an outside start is ignored while this realm already owns a call", async () => {
-  const calls: { method: string; args: unknown }[] = [];
-  const agent = new VoiceAgent();
-  agent.bind({
-    rpc: {
-      call: (async (method: string, args: unknown) => {
-        calls.push({ method, args });
-        return { ok: true };
-      }) as never,
-    },
-    context: { threadId: null, projectId: null, onNewThreadScreen: false },
-    composer: { setText() {}, updateText() {} },
-    openNewThread() {},
-  });
-  calls.length = 0;
-
-  // start() enters connecting synchronously before its first await.
-  agent.toggle();
-  assert.equal(agent.getState(), "connecting");
-  assert.equal(await agent.startFromOutside("cli-start"), false);
-  assert.equal(calls.some(({ method }) => method === "claimStart"), false);
-  agent.stop();
-});
-
 test("reloads audio preferences saved by another browser window", () => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const values = new Map<string, string>();

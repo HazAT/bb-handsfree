@@ -4,12 +4,9 @@
 // app; this backend holds the OpenAI API key, performs the SDP exchange with
 // the OpenAI Realtime API, and executes the voice agent's tools against the
 // bb SDK (threads, projects, diffs, panes).
-import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -23,13 +20,6 @@ import {
   type Voice,
 } from "./models.ts";
 import { DEFAULT_SHORTCUTS, isValidShortcut, normalizeShortcuts, type Shortcuts } from "./shortcuts.ts";
-import {
-  OMARCHY_TOOL_SCHEMAS,
-  OmarchyToolError,
-  omarchyAvailable,
-  runOmarchyTool,
-  type OmarchyToolDeps,
-} from "./omarchy-tools.ts";
 
 /**
  * Rebindable keyboard shortcuts (see shortcuts.ts): each value is a
@@ -137,7 +127,6 @@ export const rpcContract = defineRpcContract({
         notifications: z.boolean(),
         pluginCommands: z.string(),
         delegate: z.boolean(),
-        omarchyTools: z.boolean(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]),
         shortcuts: shortcutsSchema,
       })
@@ -152,7 +141,6 @@ export const rpcContract = defineRpcContract({
         notifications: z.boolean().optional(),
         pluginCommands: z.string().max(2000).optional(),
         delegate: z.boolean().optional(),
-        omarchyTools: z.boolean().optional(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]).optional(),
         shortcuts: shortcutsSchema.optional(),
       })
@@ -164,7 +152,6 @@ export const rpcContract = defineRpcContract({
         notifications: z.boolean(),
         pluginCommands: z.string(),
         delegate: z.boolean(),
-        omarchyTools: z.boolean(),
         credentialPreference: z.enum(["auto", "apiKey", "subscription"]),
         shortcuts: shortcutsSchema,
       })
@@ -202,11 +189,6 @@ export const rpcContract = defineRpcContract({
         subscriptionAvailable: z.boolean(),
       })
       .strict(),
-  },
-  /** Claim a CLI start request. Exactly one mounted composer realm may win. */
-  claimStart: {
-    input: z.object({ nonce: z.string().min(1) }).strict(),
-    output: z.object({ claimed: z.boolean() }).strict(),
   },
   /** Append one event to a voice session's transcript log. */
   logEvent: {
@@ -379,7 +361,6 @@ class ToolRunError extends Error {
 }
 
 function classifyToolError(error: unknown): ToolErrorClass {
-  if (error instanceof OmarchyToolError) return error.code;
   if (error instanceof ToolRunError) return error.errorClass;
   if (error && typeof error === "object") {
     const code = (error as { code?: unknown }).code;
@@ -438,10 +419,7 @@ interface PluginCommandInfo {
   summary: string;
 }
 
-function toolSchemas(
-  pluginCommands: PluginCommandInfo[] = [],
-  options: { delegate?: boolean; omarchyTools?: boolean } = {},
-) {
+function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delegate?: boolean } = {}) {
   const delegateTool = options.delegate
     ? [
         {
@@ -497,12 +475,18 @@ function toolSchemas(
     { type: "function", name: "show_diff", description: "Summarize a thread's workspace diff (changed files, additions/deletions) and focus the thread so the user can see it.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "update_instructions", description: "Amend your own standing instructions (the system prompt for future voice sessions). Pass the COMPLETE new instructions text, not a diff. Use only when the user asks for a lasting behavior change.", parameters: { type: "object", properties: { instructions: { type: "string", description: "The full replacement instructions." }, reason: { type: "string", description: "One short sentence: why, quoting the user's request." } }, required: ["instructions", "reason"] } },
     ...delegateTool,
-    ...(options.omarchyTools ? OMARCHY_TOOL_SCHEMAS : []),
     // Handled locally in the bb app frontend, never reaches runTool:
     { type: "function", name: "set_composer_text", description: "Replace the text in the user's message composer (the box they type prompts into).", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { type: "function", name: "append_composer_text", description: "Append text to the user's message composer.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
   ];
 }
+
+const HANDSFREE_SERVER_TOOL_NAMES = new Set([
+  "run_plugin_command",
+  ...toolSchemas([], { delegate: true })
+    .map((tool) => tool.name)
+    .filter((name) => name !== "set_composer_text" && name !== "append_composer_text"),
+]);
 
 const DEFAULT_PROMPT = `You are Aide, a concise voice operator for bb — the user's agentic IDE where coding agents run in threads inside projects.
 
@@ -543,10 +527,6 @@ const ASSISTANT_BRIEF = `You are the background agent for Aide, a voice assistan
 
 /** Appended to the voice session's instructions while delegation is enabled. */
 const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
-
-const OMARCHY_PROMPT_SECTION = `\n\nOn this Omarchy desktop, you go by Omar and introduce yourself as Omar; this overrides any other name in your standing instructions while these tools are enabled. You also operate Hyprland and the Omarchy shell. Prefer the precise Omarchy tools; when none fits, use omarchy_help before omarchy_command. Use omarchy_status when asked how the system is doing. Explain settings in plain words using read_config_file and hyprland_get_option, and never read paths or ids aloud. Runtime option changes are temporary until Hyprland reloads. Before a destructive or disruptive action, ask one short confirmation question and pass confirmed only after the user agrees. Confirm completed actions in one word. Light, dry wit is welcome—at most one brief aside per reply, never at the cost of brevity, and grounded only in real state such as the current theme or what just happened; never invent facts.`;
-
-const execFileAsync = promisify(execFile);
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -617,61 +597,16 @@ export default async function plugin(bb: BbPluginApi) {
     pluginCommands: string;
     /** Whether the delegate tool (Aide's own bb agent) is offered. */
     delegate: boolean;
-    /** Whether native Omarchy and Hyprland tools are offered. */
-    omarchyTools: boolean;
     credentialPreference: CredentialPreference;
     shortcuts: Shortcuts;
   }
   const CONFIG_KEY = "config";
-  const ACTIVE_CALL_KEY = "voice.activeCall";
-  const START_REQUEST_KEY = "voice.startRequest";
-  const ACTIVE_CALL_STALE_MS = 25_000;
-  type ActiveCall = {
-    nonce: string;
-    phase: "connecting" | "live" | "muted";
-    updatedAt: number;
-  };
-  type StartRequest = { nonce: string; claimed: boolean; requestedAt: number };
-
-  async function activeCall(): Promise<ActiveCall | null> {
-    const active = await bb.storage.kv.get<ActiveCall>(ACTIVE_CALL_KEY);
-    if (
-      !active ||
-      typeof active.nonce !== "string" ||
-      (active.phase !== "connecting" && active.phase !== "live" && active.phase !== "muted") ||
-      typeof active.updatedAt !== "number"
-    ) return null;
-    if (Date.now() - active.updatedAt <= ACTIVE_CALL_STALE_MS) return active;
-    await bb.storage.kv.delete(ACTIVE_CALL_KEY);
-    return null;
-  }
-
-  async function clearActiveCall(nonce: string) {
-    const active = await bb.storage.kv.get<ActiveCall>(ACTIVE_CALL_KEY);
-    if (active?.nonce === nonce) await bb.storage.kv.delete(ACTIVE_CALL_KEY);
-  }
-
-  // RPC handlers can overlap at awaits. Serialize claims so two composer realms
-  // cannot both read the same unclaimed kv value before either writes it.
-  let claimQueue: Promise<void> = Promise.resolve();
-  function claimStart(nonce: string): Promise<boolean> {
-    const claim = claimQueue.then(async () => {
-      const request = await bb.storage.kv.get<StartRequest>(START_REQUEST_KEY);
-      if (!request || request.nonce !== nonce || request.claimed) return false;
-      await bb.storage.kv.set(START_REQUEST_KEY, { ...request, claimed: true });
-      return true;
-    });
-    claimQueue = claim.then(() => undefined, () => undefined);
-    return claim;
-  }
-
   const CONFIG_DEFAULTS: VoiceConfig = {
     model: DEFAULT_MODEL,
     voice: DEFAULT_VOICE,
     notifications: true,
     pluginCommands: "all",
     delegate: true,
-    omarchyTools: omarchyAvailable(),
     credentialPreference: "auto",
     shortcuts: { ...DEFAULT_SHORTCUTS },
   };
@@ -685,8 +620,6 @@ export default async function plugin(bb: BbPluginApi) {
       pluginCommands:
         typeof stored.pluginCommands === "string" ? stored.pluginCommands : CONFIG_DEFAULTS.pluginCommands,
       delegate: typeof stored.delegate === "boolean" ? stored.delegate : CONFIG_DEFAULTS.delegate,
-      omarchyTools:
-        typeof stored.omarchyTools === "boolean" ? stored.omarchyTools : CONFIG_DEFAULTS.omarchyTools,
       credentialPreference: isCredentialPreference(stored.credentialPreference)
         ? stored.credentialPreference
         : CONFIG_DEFAULTS.credentialPreference,
@@ -731,18 +664,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
     await bb.storage.kv.set("assistant.migrated", true);
   }
-
-  const omarchyDeps: OmarchyToolDeps = {
-    home: homedir(),
-    async exec(file, argv, { timeoutMs }) {
-      const { stdout, stderr } = await execFileAsync(file, argv, {
-        encoding: "utf8",
-        timeout: timeoutMs,
-        maxBuffer: 1_000_000,
-      });
-      return { stdout, stderr };
-    },
-  };
 
   // ---- plugin-command exposure ----
   // Other installed plugins contribute `bb` CLI commands. The voice agent
@@ -1029,13 +950,8 @@ export default async function plugin(bb: BbPluginApi) {
     args: Record<string, unknown>,
     context: { threadId: string | null; projectId: string | null; onNewThreadScreen?: boolean },
   ): Promise<string> {
-    if (name === "read_config_file" || name.startsWith("omarchy_") || name.startsWith("hyprland_")) {
-      if (!OMARCHY_TOOL_SCHEMAS.some((tool) => tool.name === name)) {
-        throw new ToolRunError("unknown_tool", `Unknown tool: ${name}`);
-      }
-      const { omarchyTools } = await readConfig();
-      if (!omarchyTools) return "Omarchy tools are turned off in Handsfree settings (Behavior → Omarchy tools).";
-      return runOmarchyTool(name, args, omarchyDeps);
+    if (!HANDSFREE_SERVER_TOOL_NAMES.has(name)) {
+      throw new ToolRunError("unknown_tool", `Unknown tool: ${name}`);
     }
     const str = (key: string): string => {
       const value = args[key];
@@ -1191,45 +1107,30 @@ export default async function plugin(bb: BbPluginApi) {
         const argv = Array.isArray(args.argv)
           ? (args.argv as unknown[]).filter((v): v is string => typeof v === "string")
           : [];
-        let response: Response;
-        try {
-          response = await fetch(
-            `${bb.server.loopbackBaseUrl}/api/v1/plugins/${encodeURIComponent(command.id)}/cli`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                argv,
-                ...(context.threadId ? { threadId: context.threadId } : {}),
-                ...(context.projectId ? { projectId: context.projectId } : {}),
-              }),
-            },
-          );
-        } catch (cause) {
-          const reason = cause instanceof Error ? cause.message : String(cause);
-          throw new ToolRunError("exec_failed", `Error running bb ${command.name}: ${reason}`);
-        }
+        const response = await fetch(
+          `${bb.server.loopbackBaseUrl}/api/v1/plugins/${encodeURIComponent(command.id)}/cli`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              argv,
+              ...(context.threadId ? { threadId: context.threadId } : {}),
+              ...(context.projectId ? { projectId: context.projectId } : {}),
+            }),
+          },
+        );
         const result = (await response.json().catch(() => null)) as {
           exitCode?: number;
           stdout?: string;
           stderr?: string;
           error?: string;
         } | null;
-        if (!response.ok) {
-          throw new ToolRunError(
-            "exec_failed",
-            `Error running bb ${command.name}: HTTP ${response.status}${result?.error ? ` — ${result.error}` : ""}`,
-          );
-        }
-        if (result === null) {
-          throw new ToolRunError("exec_failed", `Error running bb ${command.name}: invalid response.`);
+        if (!response.ok || result === null) {
+          return `Error running bb ${command.name}: HTTP ${response.status}${result?.error ? ` — ${result.error}` : ""}`;
         }
         const out = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
         if (result.exitCode !== 0) {
-          throw new ToolRunError(
-            "exec_failed",
-            truncate(`bb ${command.name} ${argv.join(" ")} failed (exit ${result.exitCode ?? "?"}):\n${out || "(no output)"}`),
-          );
+          return truncate(`bb ${command.name} ${argv.join(" ")} failed (exit ${result.exitCode ?? "?"}):\n${out || "(no output)"}`);
         }
         return truncate(out || "(no output)");
       }
@@ -1331,7 +1232,6 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "read", summary: "Read a thread's status and latest assistant output.", usage: "bb handsfree read <thread-id>" },
       { name: "usage", summary: "Voice-session token usage and estimated cost, grouped per day. Add --json for machine output, --days N to limit the window.", usage: "bb handsfree usage [--days N] [--json]" },
       { name: "tools", summary: "Tool calls, errors, and latency. Add --json for machine output, --days N to limit the window.", usage: "bb handsfree tools [--days N] [--json]" },
-      { name: "start", summary: "Start an Aide voice session in a bb window with a mounted composer.", usage: "bb handsfree start" },
       { name: "stop", summary: "Stop any active Aide voice session in any bb window.", usage: "bb handsfree stop" },
       { name: "mute", summary: "Mute the active voice session's microphone (call stays up).", usage: "bb handsfree mute" },
       { name: "unmute", summary: "Unmute the active voice session's microphone.", usage: "bb handsfree unmute" },
@@ -1346,7 +1246,6 @@ export default async function plugin(bb: BbPluginApi) {
         "  bb handsfree read <thread-id>         thread status + latest assistant output",
         "  bb handsfree usage [--days N] [--json] voice-session tokens and estimated cost",
         "  bb handsfree tools [--days N] [--json] tool calls, errors, and latency",
-        "  bb handsfree start                    start a voice session in an open bb window",
         "  bb handsfree stop                     stop any active voice session",
         "  bb handsfree mute | unmute            mute/unmute the active session's mic",
       ].join("\n");
@@ -1357,16 +1256,6 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "mute" || command === "unmute") {
           bb.realtime.publish("voice-mute", { muted: command === "mute" });
           return { exitCode: 0, stdout: `${command === "mute" ? "Mute" : "Unmute"} signal broadcast.` };
-        }
-        if (command === "start") {
-          const active = await activeCall();
-          if (active) {
-            return { exitCode: 1, stderr: `Aide voice session ${active.nonce} is already ${active.phase}.` };
-          }
-          const nonce = randomUUID();
-          await bb.storage.kv.set(START_REQUEST_KEY, { nonce, claimed: false, requestedAt: Date.now() });
-          bb.realtime.publish("voice-start", { nonce });
-          return { exitCode: 0, stdout: "Start signal broadcast to an open bb composer." };
         }
         if (command === "stop") {
           // Every mounted voice button listens on this channel and stops any
@@ -1486,18 +1375,17 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     async createCall({ sdp, threadId, projectId, onNewThreadScreen, nonce }) {
       const key = await apiKey();
-      const { model, voice, delegate, omarchyTools } = await readConfig();
+      const { model, voice, delegate } = await readConfig();
       const pluginCommands = await exposedPluginCommands();
       const pluginSection =
         pluginCommands.length === 0
           ? ""
           : `\n\nInstalled bb plugins contribute extra commands you can run with run_plugin_command:\n${pluginCommands.map((c) => `- ${c.id}: bb ${c.name} — ${c.summary}`).join("\n")}\nWhen unsure of a plugin's subcommands, run it with argv ["--help"] first. Summarize command output aloud in a sentence or two; never read raw JSON or long output verbatim.`;
-      const omarchySection = omarchyTools ? OMARCHY_PROMPT_SECTION : "";
       const delegateSection = delegate ? DELEGATE_PROMPT_SECTION : "";
       const session = {
         type: "realtime",
         model,
-        instructions: `${activePrompt()}${pluginSection}${omarchySection}${delegateSection}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
+        instructions: `${activePrompt()}${pluginSection}${delegateSection}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
         audio: {
           input: {
             noise_reduction: { type: "near_field" },
@@ -1514,7 +1402,7 @@ export default async function plugin(bb: BbPluginApi) {
           },
           output: { voice },
         },
-        tools: toolSchemas(pluginCommands, { delegate, omarchyTools }),
+        tools: toolSchemas(pluginCommands, { delegate }),
       };
       const form = new FormData();
       form.set("sdp", sdp);
@@ -1563,9 +1451,9 @@ export default async function plugin(bb: BbPluginApi) {
     async getTools() {
       const local = new Set(["set_composer_text", "append_composer_text"]);
       const pluginCommands = await exposedPluginCommands();
-      const { delegate, omarchyTools } = await readConfig();
+      const { delegate } = await readConfig();
       return {
-        tools: toolSchemas(pluginCommands, { delegate, omarchyTools }).map((tool) => ({
+        tools: toolSchemas(pluginCommands, { delegate }).map((tool) => ({
           name: tool.name,
           description: tool.description ?? "",
           parameters: "parameters" in tool && tool.parameters ? JSON.stringify(tool.parameters) : null,
@@ -1643,9 +1531,6 @@ export default async function plugin(bb: BbPluginApi) {
           : keySource ?? (subscriptionAvailable ? ("subscription" as const) : ("none" as const));
       return { effective, preference, hasApiKey, envKeyPresent, subscriptionAvailable };
     },
-    async claimStart({ nonce }) {
-      return { claimed: await claimStart(nonce) };
-    },
     async logEvent({ sessionId, kind, payload }) {
       db.prepare(
         "INSERT INTO session_events (session_id, ts, kind, payload) VALUES (?, ?, ?, ?)",
@@ -1667,8 +1552,6 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     async publishPresence({ nonce, phase, startedAt, client, realm }) {
-      if (phase === "idle") await clearActiveCall(nonce);
-      else await bb.storage.kv.set(ACTIVE_CALL_KEY, { nonce, phase, updatedAt: Date.now() });
       bb.realtime.publish("voice-presence", { nonce, phase, startedAt, client, realm });
       return { ok: true as const };
     },
@@ -1681,7 +1564,6 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     async forceStop({ nonce }) {
-      await clearActiveCall(nonce);
       // Durable end-marker so listSessions stops showing it live even if the
       // owner realm never logs its own session.stopped (count > 0 is enough).
       db.prepare(

@@ -74,23 +74,6 @@ A voice session is shared across all your bb windows and devices: the sidebar
 shows a live voice bar (with which device the session came through), and any
 window can pick it up or stop it.
 
-## Omarchy
-
-On an [Omarchy](https://omarchy.org/) desktop, Handsfree automatically enables
-Omar's native desktop tools. Ask *"How is the system?"*, *"Switch to Tokyo
-Night"*, *"Turn on night light"*, *"Set volume to 40 percent"*, *"Focus
-Signal"*, or *"Explain my touchpad config"*. Omar can inspect Hyprland and
-read approved config files. The fallback command router accepts only a fixed
-list of argument-free status, menu, capture, launcher, and desktop-control
-commands; help remains available for every known Omarchy route. The editor
-target opens only existing files under the home directory or the approved
-Omarchy config roots. That restriction guards the assistant; it is not a
-security boundary against other local processes. Everything else—including
-routes with arguments, sudo/package routes, config refreshes, command-bearing
-launchers, and power session commands—is denied. Toggle this access under
-Settings → Plugins →
-Handsfree → Behavior → **Omarchy tools**.
-
 ## Inspecting live threads from the terminal
 
 The same "Live threads" view from the sidebar is available as a CLI, for you
@@ -102,7 +85,6 @@ bb handsfree live --json     # machine-readable
 bb handsfree read thr_xxxxx  # a thread's status + latest assistant output
 bb handsfree usage           # what your voice sessions cost, per day (estimated)
 bb handsfree tools           # tool calls, errors, median latency, and p90 latency
-bb handsfree start           # start a voice session in an open bb composer
 bb handsfree stop            # stop an active voice session in any bb window
 ```
 
@@ -117,9 +99,8 @@ Open the Handsfree plugin settings for curated sections:
   and cedar are the highest-quality options), and a badge showing which
   credential Aide will use.
 - **Behavior** — whether Aide announces thread events, whether it may
-  delegate work to a bb agent of its own, whether Omar may control an Omarchy
-  desktop, and which installed plugins' `bb` commands it may run (all / none /
-  a specific list).
+  delegate work to a bb agent of its own, and which installed plugins' `bb`
+  commands it may run (all / none / a specific list).
 - **Audio** — pick and test the microphone with a live input-level meter. The
   chosen mic is stored in the current browser and applies to the next voice
   session; if it disconnects, Handsfree falls back to the system default.

@@ -55,7 +55,6 @@ interface VoiceConfig {
   notifications: boolean;
   pluginCommands: string;
   delegate: boolean;
-  omarchyTools: boolean;
   credentialPreference: CredentialPreference;
   shortcuts: Shortcuts;
 }
@@ -313,7 +312,6 @@ export function BehaviorSettings() {
   const loading = config === null;
   const notifications = config?.notifications ?? true;
   const delegate = config?.delegate ?? true;
-  const omarchyTools = config?.omarchyTools ?? false;
   const pluginCommands = (config?.pluginCommands ?? "all").trim();
 
   const exposure: "all" | "none" | "custom" =
@@ -355,22 +353,6 @@ export function BehaviorSettings() {
             checked={delegate}
             disabled={loading}
             onChange={(event) => void update({ delegate: event.target.checked })}
-            className="size-4 shrink-0 accent-primary"
-          />
-        </label>
-      </Group>
-
-      <Group
-        label="Omarchy tools"
-        hint="Lets Omar inspect and control this Omarchy desktop, including themes, audio, displays, apps, Hyprland, notifications, and read-only configuration help."
-      >
-        <label className="flex items-center justify-between gap-3">
-          <span className="text-sm text-foreground">Control the Omarchy desktop</span>
-          <input
-            type="checkbox"
-            checked={omarchyTools}
-            disabled={loading}
-            onChange={(event) => void update({ omarchyTools: event.target.checked })}
             className="size-4 shrink-0 accent-primary"
           />
         </label>
