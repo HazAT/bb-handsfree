@@ -11,13 +11,20 @@ const CONTEXT = { threadId: null, projectId: PROJECT, onNewThreadScreen: false }
 const ASSISTANT = "Aide's assistant";
 const ASSISTANT_KEY = "assistant.global";
 
+interface PluginCommandFixture {
+  id: string;
+  enabled: boolean;
+  status: "running";
+  cliCommand: { name: string; summary: string };
+}
+
 /**
  * The backend loaded into the SDK's fake plugin host, with just enough of
  * bb.sdk stubbed for delegation. Threads live in a map so a test can archive
  * or delete the assistant between calls and watch it get replaced. `seedKv`
  * runs before the plugin factory, to stage pre-upgrade state for migrations.
  */
-async function load(options: { seedKv?: Record<string, unknown> } = {}) {
+async function load(options: { seedKv?: Record<string, unknown>; plugins?: PluginCommandFixture[] } = {}) {
   const threads = new Map<string, Thread>();
   let spawned = 0;
   const host = createFakePluginHost({
@@ -26,7 +33,7 @@ async function load(options: { seedKv?: Record<string, unknown> } = {}) {
     sdk: {
       plugins: {
         getSettings: async () => ({ values: {} }),
-        list: async () => ({ plugins: [] }),
+        list: async () => ({ plugins: options.plugins ?? [] }),
       },
       projects: {
         list: async () => [
@@ -206,6 +213,42 @@ test("runTool records successful calls and classifies bad arguments and unknown 
     { session_id: "call-telemetry", tool: "read_thread", ok: 0, error: "bad_args" },
     { session_id: "call-telemetry", tool: "not_a_tool", ok: 0, error: "unknown_tool" },
   ]);
+});
+
+test("run_plugin_command reports nonzero exits as exec_failed telemetry", async () => {
+  const { host } = await load({
+    plugins: [
+      {
+        id: "sample-plugin",
+        enabled: true,
+        status: "running",
+        cliCommand: { name: "sample", summary: "Sample command" },
+      },
+    ],
+  });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ exitCode: 7, stdout: "", stderr: "bad flag" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+  try {
+    const result = (await host.harness.callRpc("runTool", {
+      name: "run_plugin_command",
+      args: { plugin_id: "sample-plugin", argv: ["bad"] },
+      ...CONTEXT,
+      sessionId: "plugin-failure",
+    })) as { output: string };
+    assert.equal(result.output, "Tool error: bb sample bad failed (exit 7):\nbad flag");
+
+    const row = host.bb.storage
+      .database()
+      .prepare("SELECT ok, error FROM tool_events WHERE session_id = ?")
+      .get("plugin-failure") as { ok: number; error: string };
+    assert.deepEqual(row, { ok: 0, error: "exec_failed" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("tools CLI aggregates calls, error rates, median, p90, and error classes", async () => {
