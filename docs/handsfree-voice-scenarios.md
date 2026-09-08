@@ -86,6 +86,19 @@ appears on all of them — focusing from the phone also moves the desktop.
 - **Open:** a general fix — targeting navigation at one specific client — is a
   bb-native gap.
 
+## 9. Get regular progress updates
+
+Say “give me updates every minute” while viewing a working thread. Aide reports
+what changed at that cadence and stops when the thread finishes; say “stop the
+updates” to end them sooner.
+
+- **Ideal:** concise, grounded updates arrive without interrupting you or polling
+  from the voice model.
+- **Under the hood:** the frontend runs one timeout at a time, asks the internal
+  `thread_activity` tool for events since its last cursor, and holds a prepared
+  update while you or Aide is speaking. Thread completion events and call teardown
+  cancel the in-memory schedule automatically.
+
 ## How a mis-classified navigating tool self-reports
 
 The nav block-list (currently just `focus_thread`) is small on purpose. If any

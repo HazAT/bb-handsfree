@@ -16,6 +16,7 @@ import {
   type AudioDevicePreferences,
 } from "./audio-devices.ts";
 import { clientId, realmId, identityTag, clientDescriptor, deviceSummary } from "./client-identity.ts";
+import { UpdateSchedule, type ActivityResult } from "./progress-updates.ts";
 
 export type VoiceState = "idle" | "connecting" | "live" | "muted";
 /** Who currently has the floor during a live call, for the "listening" UI. */
@@ -246,6 +247,46 @@ export class VoiceAgent {
   private helloed = false;
   /** The most recent tool call, so a suspend/teardown can name its likely cause. */
   private lastTool: { name: string; at: number } | null = null;
+  private readonly updates = new UpdateSchedule({
+    fetchActivity: async ({ threadId, afterSeq, sinceMs, focus }) => {
+      const bindings = this.bindings;
+      if (!bindings) throw new Error("no bb surface is bound right now");
+      const result = await bindings.rpc.call("runTool", {
+        name: "thread_activity",
+        args: {
+          thread_id: threadId,
+          ...(afterSeq === null ? {} : { after_seq: afterSeq }),
+          ...(sinceMs === null ? {} : { since_ms: sinceMs }),
+          ...(focus === null ? {} : { focus }),
+        },
+        ...bindings.context,
+        sessionId: this.nonce ?? undefined,
+      });
+      if (result.output.startsWith("Tool error:")) throw new Error(result.output);
+      return JSON.parse(result.output) as ActivityResult;
+    },
+    deliver: (instruction, logText) => {
+      const dc = this.session?.dc;
+      if (!dc || dc.readyState !== "open") return;
+      this.log("notice", { text: logText });
+      dc.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{ type: "input_text", text: instruction }],
+          },
+        }),
+      );
+      this.requestResponse(dc);
+    },
+    canDeliver: () => {
+      const dc = this.session?.dc;
+      return dc?.readyState === "open" && !this.userSpeaking && !this.responseActive;
+    },
+    log: (kind, payload) => this.log(kind, payload),
+  });
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -848,6 +889,7 @@ export class VoiceAgent {
 
   /** Queue a thread event; announced as one grounded digest when the session is quiet. */
   enqueueThreadEvent(event: ThreadEventNotice) {
+    this.updates.handleThreadFinished(event.threadId);
     if (!this.session) return; // only the window that owns the call announces
     const normalized = { ...event, detail: event.detail?.trim() || null };
     const fingerprint = JSON.stringify([
@@ -923,6 +965,7 @@ export class VoiceAgent {
   stop() {
     const endedNonce = this.nonce;
     if (this.session) this.log("session.stopped");
+    this.updates.stop("call-ended");
     this.clearConnectWatchdog();
     this.stopPresenceHeartbeat();
     this.liveStartedAt = null;
@@ -984,6 +1027,26 @@ export class VoiceAgent {
         bindings.composer.updateText((current) => (current ? `${current}\n${text}` : text));
         output = "Text appended to composer.";
       }
+    } else if (name === "schedule_updates") {
+      const threadId =
+        typeof args.thread_id === "string" && args.thread_id.trim()
+          ? args.thread_id.trim()
+          : bindings.context.threadId;
+      if (!threadId) {
+        output = "No thread in view and none named — ask which thread.";
+      } else {
+        const requestedInterval =
+          typeof args.interval_seconds === "number" && Number.isFinite(args.interval_seconds)
+            ? args.interval_seconds
+            : 60;
+        const intervalSeconds = Math.min(3600, Math.max(15, requestedInterval));
+        const focus = typeof args.focus === "string" && args.focus.trim() ? args.focus.trim() : null;
+        this.updates.start({ threadId, intervalMs: intervalSeconds * 1000, focus });
+        this.log("updates.scheduled", { threadId, intervalSeconds, focus });
+        output = `Updates scheduled every ${intervalSeconds} seconds.`;
+      }
+    } else if (name === "stop_updates") {
+      output = this.updates.stop("user") ? "Updates stopped." : "No updates were scheduled.";
     } else if (
       name === "start_thread" &&
       !(typeof args.prompt === "string" && args.prompt.trim())
@@ -1195,6 +1258,7 @@ export class VoiceAgent {
           this.setAssistantSpeaking(false);
         } else if (type === "input_audio_buffer.speech_stopped") {
           this.setUserSpeaking(false);
+          this.updates.flush();
           if (this.pendingNotices.size > 0) this.scheduleNoticeDrain();
         } else if (type === "response.function_call_arguments.done") {
           this.toolChain = this.toolChain
@@ -1211,6 +1275,7 @@ export class VoiceAgent {
           if (text) this.log("assistant", { text });
         } else if (type === "response.done") {
           this.setResponseActive(false);
+          this.updates.flush();
           if (this.responsePending) {
             this.responsePending = false;
             this.requestResponse(dc);

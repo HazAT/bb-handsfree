@@ -52,6 +52,8 @@ press the new combination.
 - *"Find the thread about the flaky login test and put it on screen"*
 - *"Spotlight that pane"* / *"maximize it"* / *"restore it"*
 - *"What did the agent say?"* — summarizes the latest output aloud
+- *"Give me progress updates every minute"* — regularly reports what the
+  thread's agent has done until it finishes
 - *"Tell it to also add tests for the error path"* — messages the thread's agent
 - *"Start a new thread in the replay project: fix the CI timeout"*
 - *"Show me the diff for that thread"*
@@ -166,7 +168,8 @@ Voice tools: `get_context`, `list_projects`, `list_machines`,
 `archive_thread`, `rename_thread`, `show_diff`, `update_instructions`,
 `run_plugin_command`, `delegate` (hands a task to Aide's own bb agent thread in
 the Personal project; completion arrives via the thread.idle announcement),
-plus frontend-local `set_composer_text` / `append_composer_text`.
+plus frontend-local `set_composer_text`, `append_composer_text`,
+`schedule_updates`, and `stop_updates`.
 
 Dev loop:
 
