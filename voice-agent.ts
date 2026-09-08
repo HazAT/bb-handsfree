@@ -283,7 +283,7 @@ export class VoiceAgent {
     },
     canDeliver: () => {
       const dc = this.session?.dc;
-      return dc?.readyState === "open" && !this.userSpeaking && !this.responseActive;
+      return dc?.readyState === "open" && !this.userSpeaking && !this.responseActive && !this.assistantSpeaking;
     },
     log: (kind, payload) => this.log(kind, payload),
   });
@@ -890,6 +890,7 @@ export class VoiceAgent {
   /** Queue a thread event; announced as one grounded digest when the session is quiet. */
   enqueueThreadEvent(event: ThreadEventNotice) {
     this.updates.handleThreadFinished(event.threadId);
+    if (this.updates.suppressCompletionNotice(event.threadId)) return;
     if (!this.session) return; // only the window that owns the call announces
     const normalized = { ...event, detail: event.detail?.trim() || null };
     const fingerprint = JSON.stringify([
@@ -917,6 +918,7 @@ export class VoiceAgent {
   }
 
   private drainNotices() {
+    this.updates.flush();
     const dc = this.session?.dc;
     if (!dc || dc.readyState !== "open" || this.pendingNotices.size === 0) return;
     // Never interrupt: wait for the user and the model to both go quiet.
@@ -1251,6 +1253,7 @@ export class VoiceAgent {
           type === "output_audio_buffer.cleared"
         ) {
           this.setAssistantSpeaking(false); // playback finished or interrupted
+          this.updates.flush();
         } else if (type === "input_audio_buffer.speech_started") {
           this.setUserSpeaking(true);
           // Belt-and-suspenders: a new user turn always clears "Aide speaking",
@@ -1258,8 +1261,7 @@ export class VoiceAgent {
           this.setAssistantSpeaking(false);
         } else if (type === "input_audio_buffer.speech_stopped") {
           this.setUserSpeaking(false);
-          this.updates.flush();
-          if (this.pendingNotices.size > 0) this.scheduleNoticeDrain();
+          if (this.pendingNotices.size > 0 || this.updates.hasPending()) this.scheduleNoticeDrain();
         } else if (type === "response.function_call_arguments.done") {
           this.toolChain = this.toolChain
             .then(() => this.handleToolCall(dc, event))
@@ -1275,11 +1277,10 @@ export class VoiceAgent {
           if (text) this.log("assistant", { text });
         } else if (type === "response.done") {
           this.setResponseActive(false);
-          this.updates.flush();
           if (this.responsePending) {
             this.responsePending = false;
             this.requestResponse(dc);
-          } else if (this.pendingNotices.size > 0) {
+          } else if (this.pendingNotices.size > 0 || this.updates.hasPending()) {
             this.scheduleNoticeDrain(1000);
           }
           const response = event.response as Record<string, unknown> | undefined;

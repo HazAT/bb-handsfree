@@ -38,6 +38,8 @@ interface ScheduleState {
   pending: PendingUpdate | null;
 }
 
+const COMPLETION_NOTICE_SUPPRESSION_MS = 30_000;
+
 export function formatProgressUpdate(
   result: ActivityResult,
   focus: string | null,
@@ -53,6 +55,7 @@ export function formatProgressUpdate(
 
 export class UpdateSchedule {
   private schedule: ScheduleState | null = null;
+  private lastDeliveredTerminal: { threadId: string; at: number } | null = null;
   private readonly deps: UpdateScheduleDeps;
   private readonly now: () => number;
 
@@ -63,6 +66,10 @@ export class UpdateSchedule {
 
   isActive(): boolean {
     return this.schedule !== null;
+  }
+
+  hasPending(): boolean {
+    return Boolean(this.schedule?.pending);
   }
 
   start(options: { threadId: string; intervalMs: number; focus: string | null }) {
@@ -83,12 +90,25 @@ export class UpdateSchedule {
     if (!schedule?.pending || !this.deps.canDeliver()) return;
     const pending = schedule.pending;
     schedule.pending = null;
-    this.deps.deliver(pending.instruction, pending.logText);
-    if (pending.stopReason) this.stop(pending.stopReason);
+    this.deliver(schedule, pending);
   }
 
   handleThreadFinished(threadId: string) {
-    if (this.schedule?.threadId === threadId) this.stop("thread-finished");
+    if (this.schedule?.threadId !== threadId) return;
+    if (this.lastDeliveredTerminal?.threadId === threadId) this.lastDeliveredTerminal = null;
+    this.stop("thread-finished");
+  }
+
+  suppressCompletionNotice(threadId: string): boolean {
+    const terminal = this.lastDeliveredTerminal;
+    if (!terminal) return false;
+    if (this.now() - terminal.at > COMPLETION_NOTICE_SUPPRESSION_MS) {
+      this.lastDeliveredTerminal = null;
+      return false;
+    }
+    if (terminal.threadId !== threadId) return false;
+    this.lastDeliveredTerminal = null;
+    return true;
   }
 
   stop(reason: string): boolean {
@@ -153,11 +173,15 @@ export class UpdateSchedule {
   }
 
   private queueOrDeliver(schedule: ScheduleState, update: PendingUpdate) {
-    if (this.deps.canDeliver()) {
-      this.deps.deliver(update.instruction, update.logText);
-      if (update.stopReason) this.stop(update.stopReason);
-    } else {
-      schedule.pending = update;
+    if (this.deps.canDeliver()) this.deliver(schedule, update);
+    else schedule.pending = update;
+  }
+
+  private deliver(schedule: ScheduleState, update: PendingUpdate) {
+    this.deps.deliver(update.instruction, update.logText);
+    if (update.stopReason === "thread-finished") {
+      this.lastDeliveredTerminal = { threadId: schedule.threadId, at: this.now() };
     }
+    if (update.stopReason) this.stop(update.stopReason);
   }
 }

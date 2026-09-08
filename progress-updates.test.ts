@@ -110,6 +110,7 @@ test("delivery waits while busy, skips ticks while pending, and flushes when qui
     await settleTick();
     assert.equal(fetches, 1);
     assert.equal(harness.delivered.length, 0);
+    assert.equal(harness.schedule.hasPending(), true);
 
     mock.timers.tick(1_000);
     await settleTick();
@@ -118,6 +119,7 @@ test("delivery waits while busy, skips ticks while pending, and flushes when qui
     harness.setDeliverable(true);
     harness.schedule.flush();
     assert.equal(harness.delivered.length, 1);
+    assert.equal(harness.schedule.hasPending(), false);
     assert.match(harness.delivered[0].instruction, /The agent updated the tests/);
   } finally {
     mock.timers.reset();
@@ -145,17 +147,54 @@ test("a non-live result delivers the final update and stops", async () => {
   }
 });
 
-test("handleThreadFinished stops only the matching schedule", () => {
+test("handleThreadFinished stops only the matching schedule without suppressing its notice", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
-    const harness = scheduleHarness(async () => liveResult());
+    const harness = scheduleHarness(async () => liveResult({ live: false, status: "idle" }));
+    harness.schedule.start({ threadId: "thr_work", intervalMs: 1_000, focus: null });
+    mock.timers.tick(1_000);
+    await settleTick();
     harness.schedule.start({ threadId: "thr_work", intervalMs: 1_000, focus: null });
 
     harness.schedule.handleThreadFinished("thr_other");
     assert.equal(harness.schedule.isActive(), true);
     harness.schedule.handleThreadFinished("thr_work");
     assert.equal(harness.schedule.isActive(), false);
+    assert.equal(harness.schedule.suppressCompletionNotice("thr_work"), false);
     assert.deepEqual(harness.logs.at(-1)?.payload, { reason: "thread-finished" });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a delivered terminal update suppresses one matching completion notice within 30 seconds", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const harness = scheduleHarness(async () => liveResult({ live: false, status: "idle" }));
+    harness.schedule.start({ threadId: "thr_work", intervalMs: 1_000, focus: null });
+
+    mock.timers.tick(1_000);
+    await settleTick();
+
+    assert.equal(harness.schedule.suppressCompletionNotice("thr_other"), false);
+    assert.equal(harness.schedule.suppressCompletionNotice("thr_work"), true);
+    assert.equal(harness.schedule.suppressCompletionNotice("thr_work"), false);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a delivered terminal update does not suppress completion after 30 seconds", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const harness = scheduleHarness(async () => liveResult({ live: false, status: "idle" }));
+    harness.schedule.start({ threadId: "thr_work", intervalMs: 1_000, focus: null });
+
+    mock.timers.tick(1_000);
+    await settleTick();
+    harness.setNow(130_001);
+
+    assert.equal(harness.schedule.suppressCompletionNotice("thr_work"), false);
   } finally {
     mock.timers.reset();
   }
