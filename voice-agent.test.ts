@@ -11,7 +11,7 @@ function agentWithRpcSpy() {
     rpc: {
       call: (async (method: string, args: unknown) => {
         calls.push({ method, args });
-        return { ok: true };
+        return method === "runTool" ? { output: "Sent." } : { ok: true };
       }) as never,
     },
     context: { threadId: null, projectId: null, onNewThreadScreen: false },
@@ -21,6 +21,42 @@ function agentWithRpcSpy() {
   calls.length = 0;
   return { agent, calls };
 }
+
+test("stages relay tools and runs the staged call only after confirmation", async () => {
+  const { agent, calls } = agentWithRpcSpy();
+  const sent: Record<string, unknown>[] = [];
+  const dc = {
+    readyState: "open",
+    send(data: string) {
+      sent.push(JSON.parse(data));
+    },
+  } as unknown as RTCDataChannel;
+  const internals = agent as unknown as {
+    handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
+    confirmationGate: { noteUserTurn(): void };
+  };
+  const args = { thread_id: "thr_work", message: "Run the error-path tests" };
+
+  await internals.handleToolCall(dc, {
+    name: "send_to_thread",
+    call_id: "call-stage",
+    arguments: JSON.stringify(args),
+  });
+  assert.equal(calls.filter((call) => call.method === "runTool").length, 0);
+  assert.match(JSON.stringify(sent), /nothing was sent/i);
+
+  internals.confirmationGate.noteUserTurn();
+  await internals.handleToolCall(dc, {
+    name: "confirm_pending",
+    call_id: "call-confirm",
+    arguments: "{}",
+  });
+
+  const relayed = calls.filter((call) => call.method === "runTool");
+  assert.equal(relayed.length, 1);
+  assert.equal((relayed[0].args as { name: string }).name, "send_to_thread");
+  assert.deepEqual((relayed[0].args as { args: unknown }).args, args);
+});
 
 test("mirrors a call owned by another realm from voice-presence", () => {
   const agent = new VoiceAgent();

@@ -40,7 +40,8 @@ then select …".
 
 ## 4. Agent starts a new thread — `start_thread` *(mobile)*
 
-You ask Aide to start a thread and let it run. It starts it, the call keeps going,
+You ask Aide to start a thread and let it run. Aide reads the prompt back and
+asks “Start?” After you say yes, it starts the thread; the call keeps going and
 nothing navigates. Aide says "started — tap it in your list to view."
 
 - **Ideal:** the work starts without dropping the call or moving any screen.
@@ -98,6 +99,20 @@ updates” to end them sooner.
   `thread_activity` tool for events since its last cursor, and holds a prepared
   update while you or Aide is speaking. Thread completion events and call teardown
   cancel the in-memory schedule automatically.
+
+## 10. Confirm before relaying
+
+Ask Aide to message a thread, start a thread with a prompt, or delegate work.
+Aide reads the request back in a short sentence and asks “Send?” or “Start?”;
+only your yes causes the request to run.
+
+- **Ideal:** no spoken request reaches a coding agent until you have heard and
+  approved exactly what will be relayed.
+- **Under the hood:** `send_to_thread`, prompted `start_thread`, and `delegate`
+  only stage their name and arguments in a frontend confirmation gate. The gate
+  releases that exact call through `confirm_pending` only when exactly one user
+  turn has happened since staging. Zero turns are refused; two or more expire
+  and clear it; a corrected proposal replaces it. Ending the call clears it.
 
 ## How a mis-classified navigating tool self-reports
 

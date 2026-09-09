@@ -545,7 +545,7 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delega
           type: "function",
           name: "delegate",
           description:
-            "Hand a task to your own bb agent, which has a shell, git, and the full bb CLI — so it can do anything bb can: create projects, clone repositories, run commands, investigate code across threads. It works in the background in a visible thread titled \"Aide's assistant\" in the user's Personal project (never inside the project in view); you are told when it finishes. Use it for anything the direct tools cannot do, or that needs several steps. Do NOT use it for navigation or a single lookup — those have instant tools.",
+            "Stage a task for your own bb agent, which has a shell, git, and the full bb CLI — so it can do anything bb can: create projects, clone repositories, run commands, investigate code across threads. Nothing runs until the user confirms and confirm_pending is called. Once confirmed, it works in the background in a visible thread titled \"Aide's assistant\" in the user's Personal project (never inside the project in view); you are told when it finishes. Use it for anything the direct tools cannot do, or that needs several steps. Do NOT use it for navigation or a single lookup — those have instant tools.",
           parameters: {
             type: "object",
             properties: {
@@ -586,8 +586,8 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delega
     { type: "function", name: "read_thread", description: "Read a thread's details and its latest assistant output.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "focus_thread", description: "Open/focus a thread in the user's bb app window.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "set_pane", description: "Change a thread pane's presentation in the bb app: spotlight, clear-spotlight, maximize, restore, or toggle.", parameters: { type: "object", properties: { thread_id: { type: "string" }, action: { type: "string", enum: ["spotlight", "clear-spotlight", "maximize", "restore", "toggle"] } }, required: ["thread_id", "action"] } },
-    { type: "function", name: "send_to_thread", description: "Send a message to a thread's agent. Starts a turn if idle, queues/steers if running.", parameters: { type: "object", properties: { thread_id: { type: "string" }, message: { type: "string" } }, required: ["thread_id", "message"] } },
-    { type: "function", name: "start_thread", description: "Start a new agent thread in a project. Only pass prompt when the user dictated actual work; With no prompt, this opens bb's New thread screen for the user to type their own. Runs on the project's default machine unless machine_id is given — if the project lives on several connected machines and the user didn't say which, check list_machines and ask one short question instead of guessing.", parameters: { type: "object", properties: { project_id: { type: "string", description: "Project id; defaults to the user's current project." }, prompt: { type: "string", description: "The user's own instruction for the agent, verbatim. Omit if they didn't give one." }, title: { type: "string" }, machine_id: { type: "string", description: "Machine (host) id to run on, from list_machines. Omit to use the project's default machine." } } } },
+    { type: "function", name: "send_to_thread", description: "Stage a message to a thread's agent. Nothing is sent until the user confirms and confirm_pending is called; then it starts a turn if idle or queues/steers if running.", parameters: { type: "object", properties: { thread_id: { type: "string" }, message: { type: "string" } }, required: ["thread_id", "message"] } },
+    { type: "function", name: "start_thread", description: "Stage a new agent thread when prompt contains dictated work. Nothing starts until the user confirms and confirm_pending is called. With no prompt, this instead opens bb's New thread screen for the user to type their own. Runs on the project's default machine unless machine_id is given — if the project lives on several connected machines and the user didn't say which, check list_machines and ask one short question instead of guessing.", parameters: { type: "object", properties: { project_id: { type: "string", description: "Project id; defaults to the user's current project." }, prompt: { type: "string", description: "The user's own instruction for the agent, verbatim. Omit if they didn't give one." }, title: { type: "string" }, machine_id: { type: "string", description: "Machine (host) id to run on, from list_machines. Omit to use the project's default machine." } } } },
     { type: "function", name: "stop_thread", description: "Stop a running thread.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "archive_thread", description: "Archive a thread (and its children).", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
     { type: "function", name: "rename_thread", description: "Rename a thread.", parameters: { type: "object", properties: { thread_id: { type: "string" }, title: { type: "string" } }, required: ["thread_id", "title"] } },
@@ -599,6 +599,7 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delega
     { type: "function", name: "append_composer_text", description: "Append text to the user's message composer.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { type: "function", name: "schedule_updates", description: "Schedule recurring spoken progress updates for a thread, replacing any existing update schedule.", parameters: { type: "object", properties: { interval_seconds: { type: "number", default: 60, description: "Seconds between updates (clamped to 15–3600; default 60)." }, thread_id: { type: "string", description: "Thread to report on; defaults to the thread in view." }, focus: { type: "string", description: "What the user wants to hear about, in their own words." } } } },
     { type: "function", name: "stop_updates", description: "Stop the recurring spoken progress updates." },
+    { type: "function", name: "confirm_pending", description: "Send the request staged by the last send_to_thread, start_thread, or delegate call. Call only after the user heard it read back and said yes." },
   ];
 }
 
@@ -607,7 +608,7 @@ const HANDSFREE_SERVER_TOOL_NAMES = new Set([
   "thread_activity",
   ...toolSchemas([], { delegate: true })
     .map((tool) => tool.name)
-    .filter((name) => !["set_composer_text", "append_composer_text", "schedule_updates", "stop_updates"].includes(name)),
+    .filter((name) => !["set_composer_text", "append_composer_text", "schedule_updates", "stop_updates", "confirm_pending"].includes(name)),
 ]);
 
 const DEFAULT_PROMPT = `You are Aide, a concise voice operator for bb — the user's agentic IDE where coding agents run in threads inside projects.
@@ -615,7 +616,7 @@ const DEFAULT_PROMPT = `You are Aide, a concise voice operator for bb — the us
 You are an orchestrator, not a worker: the coding agents in the threads do the work; you route the user's words to them and navigate the workspace. You can list/search/read threads, focus them on screen, spotlight or maximize panes, send messages to agent threads, start new threads, stop or archive threads, summarize diffs, and edit the user's prompt composer.
 
 Rules:
-- Default to relaying. When the user is in a thread (get_context shows one), anything they say about the work goes to that thread's agent with send_to_thread, in their own words: instructions, answers, corrections, "continue", "also do X", questions about the code. Do not answer or act on it yourself, and do not ask clarifying questions — if something is unclear, the thread's agent will ask. Confirm in one word ("Sent."). Handle it yourself only when it is clearly aimed at you or the workspace: navigating (focus, spotlight, list, search, switch), reading results aloud ("what did it say?"), stopping, archiving or renaming, starting a new thread, or work outside the current thread.
+- Default to relaying. When the user is in a thread (get_context shows one), anything they say about the work goes to that thread's agent with send_to_thread, in their own words: instructions, answers, corrections, "continue", "also do X", questions about the code. Do not answer or act on it yourself, and do not ask clarifying questions about its content — if something is unclear, the thread's agent will ask. Stage it for the required readback and confirmation before sending. Handle it yourself only when it is clearly aimed at you or the workspace: navigating (focus, spotlight, list, search, switch), reading results aloud ("what did it say?"), stopping, archiving or renaming, starting a new thread, or work outside the current thread.
 - With no thread in view, route work to your own agent (delegate, when available) or start a thread; never do the work yourself.
 - Be succinct. Confirm actions in one word ("Done.", "Focused.", "Sent."). Never narrate what you're about to do, never enumerate options, never restate the user's request. The one place you say more is when reading agent output aloud (next rule).
 - Thread ids look like thr_x… and project ids like proj_x…. When the user names a thread by topic or title, find it with list_threads or search_threads first.
@@ -663,6 +664,8 @@ const FULL_ACCESS = {
 const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
 
 const UPDATES_PROMPT_SECTION = `\n\nWhen the user asks to be kept posted at a cadence (for example, "updates every minute" or "keep me posted every 30 seconds"), call schedule_updates with that interval and, as focus, what they care about in their own words. It defaults to the thread in view. Progress updates then arrive from bb at each interval; speak each in one to three sentences and name the thread by title. Updates end automatically when that thread's agent finishes its turn. Use stop_updates when the user says "stop the updates" or "that's enough." Never poll with read_thread.`;
+
+const CONFIRM_PROMPT_SECTION = `\n\nRelaying work is always two steps. A call to send_to_thread, start_thread with a prompt, or delegate only stages the request; it does not send or start anything. After staging, read the request back in one short sentence using the user's words, ask "Send?" (or "Start?" for a new thread), then stop and wait. If the user's very next answer is yes, call confirm_pending and then confirm in one word ("Sent." or "Started."). If they say no, do not call confirm_pending and drop the request. If they change the request, stage the corrected request and read it back again. Never call confirm_pending in the same turn as staging. Silence is not a yes.`;
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -1602,7 +1605,7 @@ export default async function plugin(bb: BbPluginApi) {
       const session = {
         type: "realtime",
         model,
-        instructions: `${activePrompt()}${pluginSection}${delegateSection}${UPDATES_PROMPT_SECTION}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
+        instructions: `${activePrompt()}${pluginSection}${delegateSection}${UPDATES_PROMPT_SECTION}${CONFIRM_PROMPT_SECTION}\n\nCurrent context: threadId=${threadId ?? "none"}, projectId=${projectId ?? "none"}${onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
         audio: {
           input: {
             noise_reduction: { type: "near_field" },
@@ -1666,7 +1669,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { sdp: text };
     },
     async getTools() {
-      const local = new Set(["set_composer_text", "append_composer_text", "schedule_updates", "stop_updates"]);
+      const local = new Set(["set_composer_text", "append_composer_text", "schedule_updates", "stop_updates", "confirm_pending"]);
       const pluginCommands = await exposedPluginCommands();
       const { delegate } = await readConfig();
       return {

@@ -17,6 +17,7 @@ import {
 } from "./audio-devices.ts";
 import { clientId, realmId, identityTag, clientDescriptor, deviceSummary } from "./client-identity.ts";
 import { UpdateSchedule, type ActivityResult } from "./progress-updates.ts";
+import { CONFIRMED_TOOLS, ConfirmationGate } from "./confirm-gate.ts";
 
 export type VoiceState = "idle" | "connecting" | "live" | "muted";
 /** Who currently has the floor during a live call, for the "listening" UI. */
@@ -203,6 +204,7 @@ export class VoiceAgent {
       : { inputDeviceId: "", inputLabel: "" };
   /** Serializes tool executions so outputs are submitted in call order. */
   private toolChain: Promise<void> = Promise.resolve();
+  private readonly confirmationGate = new ConfirmationGate();
   /** True while the model is generating a response (response.created→done). */
   private responseActive = false;
   /** A response.create is owed once the active response finishes. */
@@ -968,6 +970,7 @@ export class VoiceAgent {
     const endedNonce = this.nonce;
     if (this.session) this.log("session.stopped");
     this.updates.stop("call-ended");
+    this.confirmationGate.reset();
     this.clearConnectWatchdog();
     this.stopPresenceHeartbeat();
     this.liveStartedAt = null;
@@ -1062,6 +1065,18 @@ export class VoiceAgent {
       bindings.openNewThread(projectId);
       output =
         "Opened the New thread screen with the project preselected. The user will type the prompt themselves; no thread exists yet.";
+    } else if (CONFIRMED_TOOLS.has(name)) {
+      output = this.confirmationGate.propose(name, args);
+      this.log("tool.staged", { name, args });
+    } else if (name === "confirm_pending") {
+      const pending = this.confirmationGate.take();
+      if (pending.ok) {
+        this.log("tool.confirmed", { name: pending.name, args: pending.args });
+        output = await this.runServerTool(pending.name, pending.args);
+      } else {
+        output = pending.output;
+        this.log("tool.refused", { name, output });
+      }
     } else if (
       MOBILE_NAV_TOOLS.has(name) &&
       clientDescriptor.mobile &&
@@ -1074,25 +1089,7 @@ export class VoiceAgent {
       output =
         "On mobile you can't navigate the app during a live call — it would background the call and cut the mic. Do NOT navigate. Instead, tell the user in one short sentence exactly what to tap to get there themselves.";
     } else {
-      // These tools navigate (…→ threads.open) which would background a live
-      // mobile call — tell the server not to focus so the work still happens but
-      // nothing navigates. (The promptless start_thread is handled above.)
-      const suppressFocus =
-        FOCUS_SUPPRESSIBLE_TOOLS.has(name) &&
-        clientDescriptor.mobile &&
-        (this.state === "live" || this.state === "muted");
-      if (suppressFocus) this.logDiag("nav.suppressedFocus", { name });
-      try {
-        const result = await bindings.rpc.call("runTool", {
-          name,
-          args: suppressFocus ? { ...args, focus: false } : args,
-          ...bindings.context,
-          sessionId: this.nonce ?? undefined,
-        });
-        output = result.output;
-      } catch (error) {
-        output = `Tool error: ${error instanceof Error ? error.message : String(error)}`;
-      }
+      output = await this.runServerTool(name, args);
     }
     this.log("tool.result", { name, output: output.slice(0, 4000) });
     if (!callId || dc.readyState !== "open") return;
@@ -1104,6 +1101,30 @@ export class VoiceAgent {
       }),
     );
     this.requestResponse(dc);
+  }
+
+  private async runServerTool(name: string, args: Record<string, unknown>): Promise<string> {
+    const bindings = this.bindings;
+    if (!bindings) return "Tool error: no bb surface is bound right now.";
+    // These tools navigate (…→ threads.open) which would background a live
+    // mobile call — tell the server not to focus so the work still happens but
+    // nothing navigates. (The promptless start_thread is handled above.)
+    const suppressFocus =
+      FOCUS_SUPPRESSIBLE_TOOLS.has(name) &&
+      clientDescriptor.mobile &&
+      (this.state === "live" || this.state === "muted");
+    if (suppressFocus) this.logDiag("nav.suppressedFocus", { name });
+    try {
+      const result = await bindings.rpc.call("runTool", {
+        name,
+        args: suppressFocus ? { ...args, focus: false } : args,
+        ...bindings.context,
+        sessionId: this.nonce ?? undefined,
+      });
+      return result.output;
+    } catch (error) {
+      return `Tool error: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   private async start() {
@@ -1261,6 +1282,7 @@ export class VoiceAgent {
           this.setAssistantSpeaking(false);
         } else if (type === "input_audio_buffer.speech_stopped") {
           this.setUserSpeaking(false);
+          this.confirmationGate.noteUserTurn();
           if (this.pendingNotices.size > 0 || this.updates.hasPending()) this.scheduleNoticeDrain();
         } else if (type === "response.function_call_arguments.done") {
           this.toolChain = this.toolChain

@@ -54,8 +54,10 @@ press the new combination.
 - *"What did the agent say?"* — summarizes the latest output aloud
 - *"Give me progress updates every minute"* — regularly reports what the
   thread's agent has done until it finishes
-- *"Tell it to also add tests for the error path"* — messages the thread's agent
-- *"Start a new thread in the replay project: fix the CI timeout"*
+- *"Tell it to also add tests for the error path"* — stages a message for the
+  thread's agent; Aide reads it back and asks **“Send?”** before anything is sent
+- *"Start a new thread in the replay project: fix the CI timeout"* — Aide reads
+  the prompt back and asks **“Start?”** before creating the thread
 - *"Show me the diff for that thread"*
 - *"Stop that thread"* / *"archive it"* / *"rename it to 'CI fix'"*
 - *"Type a prompt for me: refactor the session store to…"* — writes into
@@ -160,7 +162,9 @@ and [docs/handsfree-voice-scenarios.md](docs/handsfree-voice-scenarios.md).
 
 Tool-call flow: model → data channel → `app.tsx` → plugin RPC `runTool` →
 `bb.sdk` → output back over the data channel (function_call_output +
-response.create).
+response.create). Relay tools are first staged in the frontend; after the
+readback and the user's yes, the model calls frontend-local `confirm_pending`,
+which sends the staged call through the same RPC path exactly once.
 
 Voice tools: `get_context`, `list_projects`, `list_machines`,
 `list_live_threads`, `list_threads`, `search_threads`, `read_thread`,
@@ -169,7 +173,8 @@ Voice tools: `get_context`, `list_projects`, `list_machines`,
 `run_plugin_command`, `delegate` (hands a task to Aide's own bb agent thread in
 the Personal project; completion arrives via the thread.idle announcement),
 plus frontend-local `set_composer_text`, `append_composer_text`,
-`schedule_updates`, and `stop_updates`.
+`schedule_updates`, `stop_updates`, and `confirm_pending` (releases one staged
+relay after the user confirms it).
 
 Dev loop:
 
