@@ -1610,15 +1610,12 @@ export default async function plugin(bb: BbPluginApi) {
           input: {
             noise_reduction: { type: "near_field" },
             transcription: { model: "gpt-realtime-whisper" },
-            // Default server VAD (threshold 0.5) fires on background noise and
-            // makes Aide respond to phantom turns. Require a stronger signal and
-            // a longer pause before treating audio as an utterance.
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.75,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 700,
-            },
+            // A fixed-silence VAD ends the turn on any thoughtful pause, so a
+            // two-second breath became a committed request. Semantic VAD judges
+            // whether the utterance is complete; low eagerness lets the user
+            // take their time. (Its earlier server_vad tuning — threshold 0.75,
+            // 700 ms silence — is the fallback if phantom noise turns return.)
+            turn_detection: { type: "semantic_vad", eagerness: "low" },
           },
           output: { voice },
         },
