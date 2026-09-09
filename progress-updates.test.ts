@@ -59,6 +59,7 @@ test("formatProgressUpdate grounds the spoken instruction and maps terminal stat
   assert.match(update.instruction, /status: failed/);
   assert.match(update.instruction, /focus: "whether CI passes"/);
   assert.match(update.instruction, /summary: "test command failed"/);
+  assert.match(update.instruction, /otherwise do not mention that nothing is needed/);
   assert.match(update.logText, /Progress update — Fix the build: test command failed/);
 });
 
