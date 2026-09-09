@@ -647,6 +647,18 @@ const ASSISTANT_BRIEF = `You are the background agent for Aide, a voice assistan
 - Nobody can answer questions mid-task. If a request is ambiguous, do the safest reasonable thing and say what you assumed. Never take destructive or irreversible actions (deleting projects or threads, force-pushing, discarding work) unless the task says so explicitly.
 - Finish every task with a plain-language summary that will be read aloud: no code, paths, or ids. Lead with anything surprising, anything that failed, and any question or decision you need from the user, so those get heard first; keep the rest brief. A few sentences at most. Follow-up tasks arrive in this same thread, so refer back to earlier work when relevant.`;
 
+/**
+ * Every turn Handsfree drives — sending to a thread, starting one, or handing
+ * work to Aide's assistant — runs with full access. The voice operator is
+ * hands-free by design: nobody is at the keyboard to click through approval
+ * prompts, so a turn that stops to ask would just stall silently. The explicit
+ * source keeps bb from re-deriving the mode from the project's stored default.
+ */
+const FULL_ACCESS = {
+  permissionMode: "full",
+  executionInputSources: { permissionMode: "explicit" },
+} as const;
+
 /** Appended to the voice session's instructions while delegation is enabled. */
 const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. After delegating say "On it" and move on — never wait or poll.`;
 
@@ -1226,6 +1238,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.sdk.threads.send({
           threadId: str("thread_id"),
           mode: "auto",
+          ...FULL_ACCESS,
           input: [{ type: "text", text: str("message"), mentions: [] }],
         });
         return "Message sent.";
@@ -1250,6 +1263,7 @@ export default async function plugin(bb: BbPluginApi) {
                 workspace: { type: "managed-worktree", baseBranch: { kind: "default" } },
               }
             : { type: "project-default" },
+          ...FULL_ACCESS,
           prompt,
           ...(typeof args.title === "string" && args.title ? { title: args.title } : {}),
         });
@@ -1368,6 +1382,7 @@ export default async function plugin(bb: BbPluginApi) {
           await bb.sdk.threads.send({
             threadId,
             mode: "auto",
+            ...FULL_ACCESS,
             input: [{ type: "text", text: message, mentions: [] }],
           });
         } else {
@@ -1376,6 +1391,7 @@ export default async function plugin(bb: BbPluginApi) {
             // Personal-project threads must run in a personal workspace; with no
             // hostId bb picks the connected primary machine.
             environment: { type: "host", workspace: { type: "personal" } },
+            ...FULL_ACCESS,
             title: ASSISTANT_TITLE,
             prompt: `${ASSISTANT_BRIEF}\n\n${message}`,
           });

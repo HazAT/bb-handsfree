@@ -101,8 +101,8 @@ async function load(options: { seedKv?: Record<string, unknown>; plugins?: Plugi
   const toolNames = async () => (await tools()).map((tool) => tool.name);
   const activity = async (args: Record<string, unknown>) =>
     (await host.harness.callRpc("runTool", { name: "thread_activity", args, ...CONTEXT })) as { output: string };
-  const spawns = () => host.harness.sdk.callsTo("threads.spawn") as [{ projectId: string; title: string; prompt: string; environment: unknown }][];
-  const sends = () => host.harness.sdk.callsTo("threads.send") as [{ threadId: string; mode: string; input: { text: string }[] }][];
+  const spawns = () => host.harness.sdk.callsTo("threads.spawn") as [{ projectId: string; title: string; prompt: string; environment: unknown; permissionMode?: string; executionInputSources?: { permissionMode?: string } }][];
+  const sends = () => host.harness.sdk.callsTo("threads.send") as [{ threadId: string; mode: string; input: { text: string }[]; permissionMode?: string; executionInputSources?: { permissionMode?: string } }][];
   return { host, threads, delegate, activity, tools, toolNames, spawns, sends };
 }
 
@@ -132,6 +132,9 @@ test("the first delegation spawns Aide's assistant in the Personal project; the 
   assert.equal(args.projectId, PERSONAL);
   assert.deepEqual(args.environment, { type: "host", workspace: { type: "personal" } });
   assert.equal(args.title, ASSISTANT);
+  // Hands-free means nobody is there to approve: the assistant runs with full access.
+  assert.equal(args.permissionMode, "full");
+  assert.deepEqual(args.executionInputSources, { permissionMode: "explicit" });
   assert.match(args.prompt, /read aloud/);
   assert.match(args.prompt, /You live in the user's Personal project/);
   // The project the user was looking at travels with the task as context.
@@ -145,6 +148,8 @@ test("the first delegation spawns Aide's assistant in the Personal project; the 
   const [send] = sends()[0];
   assert.equal(send.threadId, first.threadId);
   assert.equal(send.mode, "auto");
+  assert.equal(send.permissionMode, "full");
+  assert.deepEqual(send.executionInputSources, { permissionMode: "explicit" });
   assert.equal(send.input[0].text, 'Task: now run the tests\nContext: the user is in project "Widgets" (proj_1), viewing thread thr_view.');
   // Delegating never navigates: that would yank the user's screen (and end a
   // live mobile call).
