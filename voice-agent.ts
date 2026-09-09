@@ -1012,6 +1012,14 @@ export class VoiceAgent {
     } catch {
       /* keep {} */
     }
+    // A call queued behind a slow tool can surface after stop() (or after a
+    // new call replaced the session). Its data channel is no longer ours, so
+    // drop it: acting on it could stage an old, unheard request into the
+    // confirmation gate of the next session.
+    if (this.session?.dc !== dc) {
+      this.log("tool.dropped", { name, reason: "session ended" });
+      return;
+    }
     this.log("tool.call", { name, args });
     this.lastTool = { name, at: Date.now() };
     let output: string;

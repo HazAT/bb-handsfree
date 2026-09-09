@@ -32,9 +32,11 @@ test("stages relay tools and runs the staged call only after confirmation", asyn
     },
   } as unknown as RTCDataChannel;
   const internals = agent as unknown as {
+    session: { dc: RTCDataChannel } | null;
     handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
     confirmationGate: { noteUserTurn(): void };
   };
+  internals.session = { dc };
   const args = { thread_id: "thr_work", message: "Run the error-path tests" };
 
   await internals.handleToolCall(dc, {
@@ -56,6 +58,40 @@ test("stages relay tools and runs the staged call only after confirmation", asyn
   assert.equal(relayed.length, 1);
   assert.equal((relayed[0].args as { name: string }).name, "send_to_thread");
   assert.deepEqual((relayed[0].args as { args: unknown }).args, args);
+});
+
+test("a tool call from an ended session can't stage into the next session's gate", async () => {
+  const { agent, calls } = agentWithRpcSpy();
+  const fakeDc = () =>
+    ({ readyState: "open", send() {} }) as unknown as RTCDataChannel;
+  const oldDc = fakeDc();
+  const newDc = fakeDc();
+  const internals = agent as unknown as {
+    session: { dc: RTCDataChannel } | null;
+    handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
+    confirmationGate: { noteUserTurn(): void; hasPending(): boolean };
+  };
+  // The call was stopped and restarted: only newDc is current now.
+  internals.session = { dc: newDc };
+  const heard = { thread_id: "thr_new", message: "the request the user heard" };
+  await internals.handleToolCall(newDc, {
+    name: "send_to_thread",
+    call_id: "call-new",
+    arguments: JSON.stringify(heard),
+  });
+  // A relay call queued behind a slow tool in the old session surfaces late.
+  await internals.handleToolCall(oldDc, {
+    name: "send_to_thread",
+    call_id: "call-old",
+    arguments: JSON.stringify({ thread_id: "thr_old", message: "OLD UNHEARD" }),
+  });
+  internals.confirmationGate.noteUserTurn();
+  await internals.handleToolCall(newDc, { name: "confirm_pending", call_id: "call-confirm", arguments: "{}" });
+
+  const relayed = calls.filter((call) => call.method === "runTool");
+  assert.equal(relayed.length, 1);
+  assert.deepEqual((relayed[0].args as { args: unknown }).args, heard);
+  assert.equal(internals.confirmationGate.hasPending(), false);
 });
 
 test("mirrors a call owned by another realm from voice-presence", () => {
