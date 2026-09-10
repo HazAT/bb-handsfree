@@ -19,13 +19,15 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import {
-  DEFAULT_MODEL,
+  BACKEND_MODEL_OPTIONS,
+  DEFAULT_BACKEND_MODEL,
   DEFAULT_VOICE,
-  MODEL_OPTIONS,
+  LIVE_MODEL,
+  VOICE_DESCRIPTIONS,
   VOICE_OPTIONS,
-  isModel,
+  isBackendModel,
   isVoice,
-  type RealtimeModel,
+  type BackendModel,
   type Voice,
 } from "./models";
 import { voiceAgent } from "./voice-agent";
@@ -47,15 +49,12 @@ import {
 import { MAC, shortcutStore } from "./shortcut-store";
 import { cn } from "@/lib/utils";
 
-type CredentialPreference = "auto" | "apiKey" | "subscription";
-
 interface VoiceConfig {
-  model: RealtimeModel;
+  backendModel: BackendModel;
   voice: Voice;
   notifications: boolean;
   pluginCommands: string;
   delegate: boolean;
-  credentialPreference: CredentialPreference;
   shortcuts: Shortcuts;
 }
 
@@ -77,7 +76,7 @@ function useVoiceConfig() {
   const refetch = useCallback(() => {
     rpc.call("getConfig", null).then(adopt, () => undefined);
   }, [rpc, adopt]);
-  useEffect(refetch, [refetch]);
+  useEffect(() => { void refetch(); }, [refetch]);
   useRealtime("config-changed", refetch);
 
   const update = useCallback(
@@ -132,174 +131,40 @@ function Group({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 // ---------------------------------------------------------------------------
-// Models: credential status + realtime model + voice.
+// Models: credential status + Live model + voice.
 // ---------------------------------------------------------------------------
 
-interface CredentialStatus {
-  effective: "apiKey" | "env" | "subscription" | "none";
-  preference: CredentialPreference;
-  hasApiKey: boolean;
-  envKeyPresent: boolean;
-  subscriptionAvailable: boolean;
-}
+interface CredentialStatus { source: "settings" | "env" | "none" }
 
-/**
- * Shows which credential Aide is using, and — only when both an API key and a
- * ChatGPT subscription are available — lets the user pick between them.
- */
 function CredentialCard() {
   const rpc = useRpc<typeof rpcContract>();
   const [status, setStatus] = useState<CredentialStatus | null>(null);
-
-  const refetch = useCallback(() => {
-    rpc.call("getCredentialStatus", null).then(setStatus, () => undefined);
-  }, [rpc]);
-  useEffect(refetch, [refetch]);
+  const refetch = useCallback(() => rpc.call("getCredentialStatus", null).then(setStatus, () => undefined), [rpc]);
+  useEffect(() => { void refetch(); }, [refetch]);
   useRealtime("config-changed", refetch);
-  // Adding the key above is a host settings save with no plugin signal we can
-  // hook, so poll while this page is open. That's why entering a key here
-  // surfaces the credential picker on its own within a couple of seconds.
-  useEffect(() => {
-    const id = setInterval(refetch, 2500);
-    return () => clearInterval(id);
-  }, [refetch]);
-
-  const statusText = (() => {
-    switch (status?.effective) {
-      case "apiKey":
-      case "env":
-        return "Using your OpenAI API key";
-      case "subscription":
-        return "Using your ChatGPT subscription";
-      default:
-        return "No credentials yet";
-    }
-  })();
-
-  const canChoose = !!status && status.hasApiKey && status.subscriptionAvailable;
-  const chooserValue: "apiKey" | "subscription" =
-    status?.preference === "subscription" ? "subscription" : "apiKey";
-
-  async function choose(preference: "apiKey" | "subscription") {
-    setStatus((prev) => (prev ? { ...prev, preference } : prev));
-    try {
-      await rpc.call("setConfig", { credentialPreference: preference });
-    } catch {
-      refetch();
-    }
-  }
-
+  useEffect(() => { const id = setInterval(refetch, 2500); return () => clearInterval(id); }, [refetch]);
+  const statusText = status?.source === "settings" ? "Using the API key from Handsfree settings" : status?.source === "env" ? "Using OPENAI_API_KEY from the bb server environment" : status?.source === "none" ? "No API key yet" : "Checking…";
   async function removeKey() {
-    try {
-      await rpc.call("clearApiKey", null);
-      refetch();
-      toast.success("API key removed");
-    } catch (cause) {
-      toast.error(`Could not remove key: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }
+    try { await rpc.call("clearApiKey", null); refetch(); toast.success("API key removed"); }
+    catch (cause) { toast.error(`Could not remove key: ${cause instanceof Error ? cause.message : String(cause)}`); }
   }
-
-  // Both credentials present: pick which one Aide uses. The dropdown speaks for
-  // itself, so no hint.
-  if (canChoose) {
-    return (
-      <div className="space-y-1.5">
-        <span className="text-sm font-medium text-foreground">Credential</span>
-        <select
-          value={chooserValue}
-          onChange={(event) => void choose(event.target.value as "apiKey" | "subscription")}
-          className={selectClass}
-        >
-          <option value="subscription">ChatGPT subscription</option>
-          <option value="apiKey">OpenAI API key</option>
-        </select>
-        <div>
-          <Button type="button" variant="outline" size="sm" onClick={() => void removeKey()}>
-            Remove API key
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  // A single credential (or none): a status line plus an italic helper — the
-  // auth method, or the next step when nothing is set.
-  const helper =
-    status?.effective === "subscription"
-      ? "Signed in with codex login."
-      : status?.effective === "none"
-        ? "Add an API key above, or run codex login to use your ChatGPT subscription."
-        : null;
-  return (
-    <div className="space-y-1 rounded-md border border-border bg-muted/30 px-3 py-2">
-      <div className="flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2">
-          <span
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              status && status.effective !== "none" ? "bg-primary" : "bg-destructive/80",
-            )}
-          />
-          <span className="text-sm text-foreground">{status ? statusText : "Checking…"}</span>
-        </span>
-        {status?.hasApiKey ? (
-          <Button type="button" variant="outline" size="sm" onClick={() => void removeKey()}>
-            Remove API key
-          </Button>
-        ) : null}
-      </div>
-      {helper ? <p className="text-xs italic text-muted-foreground">{helper}</p> : null}
-    </div>
-  );
+  return <div className="space-y-1 rounded-md border border-border bg-muted/30 px-3 py-2">
+    <div className="flex items-center justify-between gap-3"><span className="flex items-center gap-2"><span className={cn("size-2 shrink-0 rounded-full", status && status.source !== "none" ? "bg-primary" : "bg-destructive/80")} /><span className="text-sm text-foreground">{statusText}</span></span>{status?.source === "settings" ? <Button type="button" variant="outline" size="sm" onClick={() => void removeKey()}>Remove API key</Button> : null}</div>
+    {status?.source === "none" ? <p className="text-xs italic text-muted-foreground">Add an API key above.</p> : null}
+  </div>;
 }
 
 export function ModelsSettings() {
   const { config, update } = useVoiceConfig();
-  const model = config?.model ?? DEFAULT_MODEL;
+  const backendModel = config?.backendModel ?? DEFAULT_BACKEND_MODEL;
   const voice = config?.voice ?? DEFAULT_VOICE;
   const loading = config === null;
-
-  return (
-    <div className="space-y-4">
-      <CredentialCard />
-      <label className="block space-y-1">
-        <span className="text-sm font-medium text-foreground">Model</span>
-        <select
-          value={model}
-          disabled={loading}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (isModel(next)) void update({ model: next });
-          }}
-          className={selectClass}
-        >
-          {MODEL_OPTIONS.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="block space-y-1">
-        <span className="text-sm font-medium text-foreground">Voice</span>
-        <select
-          value={voice}
-          disabled={loading}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (isVoice(next)) void update({ voice: next });
-          }}
-          className={selectClass}
-        >
-          {VOICE_OPTIONS.map((option) => (
-            <option key={option} value={option}>
-              {voiceLabel(option)}
-            </option>
-          ))}
-        </select>
-      </label>
-    </div>
-  );
+  return <div className="space-y-4">
+    <CredentialCard />
+    <p className="text-sm text-muted-foreground">Voice model: {LIVE_MODEL} · $0.05 per minute of call time</p>
+    <label className="block space-y-1"><span className="text-sm font-medium text-foreground">Backend model</span><select value={backendModel} disabled={loading} onChange={(event) => { if (isBackendModel(event.target.value)) void update({ backendModel: event.target.value }); }} className={selectClass}>{BACKEND_MODEL_OPTIONS.map((option) => <option key={option} value={option}>{option === "gpt-5.6-terra" ? "GPT-5.6 Terra (recommended)" : option === "gpt-5.6-luna" ? "GPT-5.6 Luna (fastest, cheapest)" : "GPT-5.6 Sol (strongest)"}</option>)}</select></label>
+    <label className="block space-y-1"><span className="text-sm font-medium text-foreground">Voice</span><select value={voice} disabled={loading} onChange={(event) => { if (isVoice(event.target.value)) void update({ voice: event.target.value }); }} className={selectClass}>{VOICE_OPTIONS.map((option) => <option key={option} value={option}>{voiceLabel(option)}{VOICE_DESCRIPTIONS[option] ? ` — ${VOICE_DESCRIPTIONS[option]}` : ""}</option>)}</select></label>
+  </div>;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +460,7 @@ function PromptEditor() {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-sm font-medium text-foreground">Prompt</span>
+        <span className="text-sm font-medium text-foreground">Instructions</span>
         {mode === "edit" ? null : (
           <span className="flex shrink-0 items-center gap-2">
             <Button
@@ -620,6 +485,8 @@ function PromptEditor() {
           </span>
         )}
       </div>
+
+      <p className="text-xs text-muted-foreground">These are Aide's standing instructions for the backend agent that runs the tools.</p>
 
       {mode === "edit" ? (
         <div className="space-y-2">

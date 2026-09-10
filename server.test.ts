@@ -186,42 +186,41 @@ test("delegate works with no project in view, and an explicit project_id is cont
   assert.match(sends()[0][0].input[0].text, /Context: the user is in project proj_other\.$/);
 });
 
-test("upgrade: old per-project assistant pointers are dropped, the global one is kept", async () => {
-  const { host } = await load({
-    seedKv: { "assistant.proj_1": "thr_old", "assistant.proj_2": "thr_older", [ASSISTANT_KEY]: "thr_global" },
-  });
-  assert.deepEqual((await host.bb.storage.kv.list("assistant.")).sort(), [ASSISTANT_KEY, "assistant.migrated"]);
-  assert.equal(await host.bb.storage.kv.get(ASSISTANT_KEY), "thr_global");
+test("the Live session sends Responses delegation and returns its session id", async () => {
+  const { host } = await load();
+  let request: { url: unknown; init?: RequestInit } | null = null;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    request = { url, init };
+    return new Response(JSON.stringify({ session: { id: "live_1" }, transport: { type: "webrtc", sdp: "v=0 answer" } }), { status: 201 });
+  }) as typeof fetch;
+  const result = await host.harness.callRpc("createCall", { sdp: "v=0 offer", threadId: null, projectId: PROJECT, nonce: "n1" });
+  assert.deepEqual(result, { sdp: "v=0 answer", sessionId: "live_1" });
+  assert.ok(request);
+  assert.equal(String(request.url), "https://api.openai.com/v1/live/sessions");
+  assert.equal(request.init?.method, "POST");
+  const body = JSON.parse(String(request.init?.body));
+  assert.equal(body.session.model, "gpt-live-1");
+  assert.equal(body.session.audio.output.voice, "marin");
+  assert.equal(body.session.delegation.responses.model, "gpt-5.6-terra");
+  assert.equal(body.session.delegation.responses.tool_choice, "auto");
+  assert.equal(body.session.delegation.responses.parallel_tool_calls, false);
+  assert.ok(body.session.delegation.responses.tools.some((tool: { name: string }) => tool.name === "delegate"));
+  assert.match(body.session.delegation.responses.instructions, /When the user asks to be kept posted/);
+  assert.match(body.session.delegation.responses.instructions, /Relaying work is always two steps/);
+  const config = await host.harness.callRpc("getSessionConfig", { threadId: null, projectId: PROJECT });
+  assert.deepEqual(config, { session: body.session });
 });
 
-test("the voice session is briefed on delegation, and the tool is sent, only while enabled", async () => {
+test("Live usage replaces seconds, accumulates backend tokens, and calculates cost", async () => {
   const { host } = await load();
-  const sessions: { instructions: string; tools: { name: string }[] }[] = [];
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-    sessions.push(JSON.parse(String((init?.body as FormData).get("session"))));
-    return new Response("v=0 answer", { status: 200 });
-  }) as typeof fetch;
-  try {
-    const call = { sdp: "v=0 offer", threadId: null, projectId: PROJECT };
-    await host.harness.callRpc("createCall", { ...call, nonce: "n1" });
-    assert.ok(sessions[0].tools.some((tool) => tool.name === "delegate"));
-    assert.match(sessions[0].instructions, /delegate tool hands it a task/);
-    assert.match(sessions[0].instructions, /in the user's Personal project/);
-    assert.match(sessions[0].instructions, /When the user asks to be kept posted at a cadence/);
-    assert.match(sessions[0].instructions, /Never poll with read_thread/);
-    assert.ok(sessions[0].tools.some((tool) => tool.name === "schedule_updates"));
-    assert.ok(sessions[0].tools.some((tool) => tool.name === "stop_updates"));
-    assert.ok(!sessions[0].tools.some((tool) => tool.name === "thread_activity"));
-
-    await host.harness.callRpc("setConfig", { delegate: false });
-    await host.harness.callRpc("createCall", { ...call, nonce: "n2" });
-    assert.ok(!sessions[1].tools.some((tool) => tool.name === "delegate"));
-    assert.doesNotMatch(sessions[1].instructions, /delegate tool/);
-    assert.match(sessions[1].instructions, /When the user asks to be kept posted at a cadence/);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  await host.harness.callRpc("logEvent", { sessionId: "live_usage", kind: "session.started", payload: {} });
+  await host.harness.callRpc("recordUsage", { sessionId: "live_usage", seconds: 30 });
+  await host.harness.callRpc("recordUsage", { sessionId: "live_usage", seconds: 90 });
+  await host.harness.callRpc("recordBackendUsage", { sessionId: "live_usage", input: 1000, cached: 200, output: 500 });
+  await host.harness.callRpc("recordBackendUsage", { sessionId: "live_usage", input: 300, cached: 100, output: 100 });
+  const result = await host.harness.callRpc("listSessions", { offset: 0 }) as { sessions: { id: string; costUsd: number }[] };
+  assert.equal(result.sessions[0].id, "live_usage");
+  assert.equal(result.sessions[0].costUsd, Number((90 / 60 * 0.05 + (1000 * 2 + 300 * 0.2 + 600 * 12) / 1e6).toFixed(4)));
 });
 
 test("update tools are frontend-local and thread_activity remains internal", async () => {

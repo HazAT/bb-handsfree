@@ -1320,10 +1320,11 @@ export class VoiceAgent {
           // writing an orphan usage row.
           if (usage && typeof usage === "object" && this.nonce) {
             void this.bindings?.rpc
-              .call("recordUsage", {
-                model: typeof response?.model === "string" ? response.model : null,
+              .call("recordBackendUsage", {
                 sessionId: this.nonce,
-                usage: usage as Record<string, unknown>,
+                input: Number((usage as Record<string, unknown>).input_tokens ?? 0),
+                cached: Number(((usage as Record<string, unknown>).input_tokens_details as { cached_tokens?: number } | undefined)?.cached_tokens ?? 0),
+                output: Number((usage as Record<string, unknown>).output_tokens ?? 0),
               })
               .catch(() => undefined); // cost tracking must never break the call
           }
