@@ -188,17 +188,17 @@ test("delegate works with no project in view, and an explicit project_id is cont
 
 test("the Live session sends Responses delegation and returns its session id", async () => {
   const { host } = await load();
-  let request: { url: unknown; init?: RequestInit } | null = null;
+  const requests: { url: unknown; init?: RequestInit }[] = [];
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-    request = { url, init };
-    return new Response(JSON.stringify({ session: { id: "live_1" }, transport: { type: "webrtc", sdp: "v=0 answer" } }), { status: 201 });
+    requests.push({ url, init });
+    return new Response(JSON.stringify({ session: { id: `live_${requests.length}` }, transport: { type: "webrtc", sdp: "v=0 answer" } }), { status: 201 });
   }) as typeof fetch;
-  const result = await host.harness.callRpc("createCall", { sdp: "v=0 offer", threadId: null, projectId: PROJECT, nonce: "n1" });
+  const call = { sdp: "v=0 offer", threadId: null, projectId: PROJECT };
+  const result = await host.harness.callRpc("createCall", { ...call, nonce: "n1" });
   assert.deepEqual(result, { sdp: "v=0 answer", sessionId: "live_1" });
-  assert.ok(request);
-  assert.equal(String(request.url), "https://api.openai.com/v1/live/sessions");
-  assert.equal(request.init?.method, "POST");
-  const body = JSON.parse(String(request.init?.body));
+  assert.equal(String(requests[0].url), "https://api.openai.com/v1/live/sessions");
+  assert.equal(requests[0].init?.method, "POST");
+  const body = JSON.parse(String(requests[0].init?.body));
   assert.equal(body.session.model, "gpt-live-1");
   assert.equal(body.session.audio.output.voice, "marin");
   assert.equal(body.session.delegation.responses.model, "gpt-5.6-terra");
@@ -207,8 +207,16 @@ test("the Live session sends Responses delegation and returns its session id", a
   assert.ok(body.session.delegation.responses.tools.some((tool: { name: string }) => tool.name === "delegate"));
   assert.match(body.session.delegation.responses.instructions, /When the user asks to be kept posted/);
   assert.match(body.session.delegation.responses.instructions, /Relaying work is always two steps/);
+  assert.doesNotMatch(body.session.instructions, /get_context/);
   const config = await host.harness.callRpc("getSessionConfig", { threadId: null, projectId: PROJECT });
   assert.deepEqual(config, { session: body.session });
+
+  await host.harness.callRpc("setConfig", { delegate: false });
+  await host.harness.callRpc("createCall", { ...call, nonce: "n2" });
+  const secondBody = JSON.parse(String(requests[1].init?.body));
+  assert.ok(!secondBody.session.delegation.responses.tools.some((tool: { name: string }) => tool.name === "delegate"));
+  assert.doesNotMatch(secondBody.session.delegation.responses.instructions, /delegate tool hands it a task/);
+  assert.match(secondBody.session.delegation.responses.instructions, /When the user asks to be kept posted/);
 });
 
 test("Live usage replaces seconds, accumulates backend tokens, and calculates cost", async () => {

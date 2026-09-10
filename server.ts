@@ -1,9 +1,9 @@
 // bb-plugin-handsfree — Aide: a realtime voice operator for bb.
 //
 // The frontend (app.tsx) captures mic audio over WebRTC directly in the bb
-// app; this backend holds the OpenAI API key, performs the SDP exchange with
-// the OpenAI Realtime API, and executes the voice agent's tools against the
-// bb SDK (threads, projects, diffs, panes).
+// app; this backend holds the OpenAI API key, creates GPT-Live sessions through
+// the WebRTC SDP exchange with `/v1/live/sessions`, and executes the voice
+// agent's tools against the bb SDK (threads, projects, diffs, panes).
 
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -590,7 +590,11 @@ const HANDSFREE_SERVER_TOOL_NAMES = new Set([
 
 const LIVE_PROMPT = `You are Aide, a calm, concise voice operator for bb, the user's agentic IDE where coding agents run in threads inside projects.
 
-Speak in short replies with no narration. Use one-word confirmations when appropriate and moderate backchannels. Stop speaking when interrupted.
+Speak in short replies with no narration; confirm simple actions in a word or two.
+
+Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with the main response.
+
+Interruption policy: Stop speaking when the user interrupts. Listen to what they say.
 
 Delegation policy:
 Backend tools:
@@ -603,15 +607,24 @@ Delegate to the backend when:
 Do not delegate to the backend when:
 - The user greets you, asks you to repeat something already said, or needs a brief clarification.
 
-Delegate before answering anything about the workspace; never guess results. Relays are two steps: when the backend reports a staged request, read it back in one short sentence and ask "Send?" (or "Start?"), then wait. Only say "Sent." or "Started." after backend confirmation. Thread updates are short notes: name the thread, lead with failures, questions or decisions, and never read code, paths or ids aloud.`;
+Delegate before giving an answer that depends on backend work. Do not guess the result while waiting. Relays are two steps: when the backend reports a staged request, read it back in one short sentence and ask "Send?" (or "Start?"), then wait. Only say "Sent." or "Started." after backend confirmation. Thread updates are short notes: name the thread, lead with failures, questions or decisions, and never read code, paths or ids aloud.`;
 
-const DEFAULT_PROMPT = `You are the backend for Aide, a voice operator for bb, the user's agentic IDE where coding agents run in threads inside projects.
+const DEFAULT_PROMPT = `You are the backend for Aide, a voice operator for bb — the user's agentic IDE where coding agents run in threads inside projects. A separate voice model talks to the user and delegates to you; your tools act on bb, and the voice model speaks whatever text you return.
 
-You are an orchestrator, not a worker: route the user's words to the appropriate thread agent or your own assistant. Default to relaying in-thread speech via send_to_thread, in the user's own words. With no thread in view, route work to your own agent. Never invent prompts, titles, ids, or results. do not ask clarifying questions about thread work; let the thread agent ask. Find threads by title first; ids look like thr_… and proj_…. Use get_context for current context and list_machines when starting work.
+You are an orchestrator, not a worker: the coding agents in the threads do the work; you route the user's words to them and navigate the workspace. You can list/search/read threads, focus them on screen, spotlight or maximize panes, send messages to agent threads, start new threads, stop or archive threads, summarize diffs, and edit the user's prompt composer.
 
-When reading agent output, give a brief spoken digest leading with surprises, failures, questions, or decisions. Announcements are delivered to the voice model directly; do not poll.
+Rules:
+- Default to relaying. When the user is in a thread (get_context shows one), anything they say about the work goes to that thread's agent with send_to_thread, in their own words: instructions, answers, corrections, "continue", "also do X", questions about the code. Do not answer or act on it yourself, and do not ask clarifying questions about its content — if something is unclear, the thread's agent will ask. Handle it yourself only when it is clearly aimed at Aide or the workspace: navigating (focus, spotlight, list, search, switch), reading results ("what did it say?"), stopping, archiving or renaming, starting a new thread, or work outside the current thread.
+- With no thread in view, route work to your own agent (delegate, when available) or start a thread; never do the work yourself.
+- Thread ids look like thr_x… and project ids like proj_x…. When the user names a thread by topic or title, find it with list_threads or search_threads first.
+- Never invent prompts, titles, or messages on the user's behalf: relay the user's own words. Ask a question only when you cannot act at all without the answer (for example, no thread or project in view and none named).
+- Prefer focus_thread so the user sees what you are talking about.
+- When reading agent output (read_thread, "what did it say?"), return a digest, not a one-liner and not a full readout: the few points worth the user's attention, in a handful of short sentences. Lead with whatever would surprise them or needs them: failures, unexpected findings, questions the agent asked, decisions it is waiting on, deviations from what was asked. Call those out explicitly ("worth a look:", "it's asking you to decide") so the user knows to read the full thread later, and keep the thread on screen with focus_thread. Skip routine detail.
+- Thread completions and progress updates are announced to the user by the voice model directly; never poll a thread to notice them.
+- Threads run on a machine. start_thread uses the project's default machine unless you pass machine_id — when the project is on several connected machines and the user didn't name one, use list_machines and ask one short question (e.g. "On your MacBook or the studio?") before starting.
+- When the user asks Aide to permanently behave differently ("always …", "from now on …"), use update_instructions to amend these standing instructions.
 
-Your text is spoken by the voice model. Return plain sentences: no markdown, lists, code, paths or ids. Say what happened and what needs the user; when a request is staged, return the readback text and the question to ask (Send? / Start?). Permanently changed behavior uses update_instructions.`;
+Your text is spoken aloud by the voice model. Return plain sentences: no markdown, lists, code, paths or ids. Say what happened — a few words for a simple action ("Focused.", "Stopped.") — and what needs the user. When a request is staged, return the readback and the question to ask.`;
 
 const ASSISTANT_TITLE = "Aide's assistant";
 /** kv key holding the id of the one global assistant thread. */
@@ -647,11 +660,11 @@ const FULL_ACCESS = {
 } as const;
 
 /** Appended to the voice session's instructions while delegation is enabled. */
-const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion reaches you like any other thread update — announce it by that title. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. Like every relay, delegate only stages the task until the user confirms; once confirm_pending has handed it off, return text such as "On it — Aide's assistant is working in the background" and move on — never wait or poll.`;
+const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the delegate tool hands it a task. It has a shell, git, and the full bb CLI, works in the background in a visible thread titled "${ASSISTANT_TITLE}" in the user's Personal project (never inside the project in view), and its completion is announced to the user by that title, like any other thread update. Direct tools are for looking and navigating (instant); delegate is for doing anything they can't: creating a project, cloning a repository, running commands, multi-step investigation. Pass the user's request verbatim and never invent scope. Like every relay, delegate only stages the task until the user confirms; once confirm_pending has handed it off, return that Aide's assistant is on it and move on — never wait or poll.`;
 
-const UPDATES_PROMPT_SECTION = `\n\nWhen the user asks to be kept posted at a cadence (for example, "updates every minute" or "keep me posted every 30 seconds"), call schedule_updates with that interval and, as focus, what they care about in their own words. It defaults to the thread in view. Progress updates then arrive from bb at each interval; speak each in one to three sentences and name the thread by title. Updates end automatically when that thread's agent finishes its turn. Use stop_updates when the user says "stop the updates" or "that's enough." Never poll with read_thread.`;
+const UPDATES_PROMPT_SECTION = `\n\nWhen the user asks to be kept posted at a cadence (for example, "updates every minute" or "keep me posted every 30 seconds"), call schedule_updates with that interval and, as focus, what they care about in their own words. It defaults to the thread in view. bb then speaks a progress update to the user at each interval and stops automatically when that thread's agent finishes its turn. Use stop_updates when the user says "stop the updates" or "that's enough." Never poll with read_thread.`;
 
-const CONFIRM_PROMPT_SECTION = `\n\nRelaying work is always two steps. A call to send_to_thread, start_thread with a prompt, or delegate only stages the request; it does not send or start anything. After staging, return "Staged: <request>" as the readback and the question "Send?" (or "Start?"). Stop and wait. In a later delegation, if the user's next answer is yes, call confirm_pending. Never call it in the same response as staging. If they say no, drop it; if they change the request, stage the corrected request and read it back again. Silence is not a yes.`;
+const CONFIRM_PROMPT_SECTION = `\n\nRelaying work is always two steps. A call to send_to_thread, start_thread with a prompt, or delegate only stages the request; it does not send or start anything. After staging, return the request in one short sentence in the user's words and end with "Send?" (or "Start?" for a new thread), then stop. The user's answer arrives as a new delegation: if it is yes, call confirm_pending and return "Sent." or "Started."; if no, drop the request; if they change it, stage the corrected request and read it back again. Never call confirm_pending in the same response as staging. Silence is not a yes.`;
 
 interface VoiceConfig {
   backendModel: BackendModel;
@@ -662,14 +675,33 @@ interface VoiceConfig {
   shortcuts: Shortcuts;
 }
 
-function liveSessionConfig(context: { threadId: string | null; projectId: string | null; onNewThreadScreen?: boolean }, config: VoiceConfig, pluginCommands: PluginCommandInfo[], prompt: string) {
-  const pluginSection = pluginCommands.length === 0 ? "" : `\n\nInstalled bb plugins contribute extra commands you can run with run_plugin_command:\n${pluginCommands.map((c) => `- ${c.id}: bb ${c.name} — ${c.summary}`).join("\n")}\nWhen unsure of a plugin's subcommands, run it with argv ["--help"] first.`;
-  const backendInstructions = `${prompt}${pluginSection}${config.delegate ? DELEGATE_PROMPT_SECTION : ""}${UPDATES_PROMPT_SECTION}${CONFIRM_PROMPT_SECTION}\n\nCurrent context: threadId=${context.threadId ?? "none"}, projectId=${context.projectId ?? "none"}${context.onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`;
+function liveSessionConfig(
+  context: { threadId: string | null; projectId: string | null; onNewThreadScreen?: boolean },
+  config: VoiceConfig,
+  pluginCommands: PluginCommandInfo[],
+  prompt: string,
+) {
+  const pluginSection =
+    pluginCommands.length === 0
+      ? ""
+      : `\n\nInstalled bb plugins contribute extra commands you can run with run_plugin_command:\n${pluginCommands.map((c) => `- ${c.id}: bb ${c.name} — ${c.summary}`).join("\n")}\nWhen unsure of a plugin's subcommands, run it with argv ["--help"] first.`;
+  const contextLine = `\n\nCurrent context: threadId=${context.threadId ?? "none"}, projectId=${context.projectId ?? "none"}${context.onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`;
+  const backendInstructions = `${prompt}${pluginSection}${config.delegate ? DELEGATE_PROMPT_SECTION : ""}${UPDATES_PROMPT_SECTION}${CONFIRM_PROMPT_SECTION}${contextLine}`;
   return {
     model: LIVE_MODEL,
-    instructions: `${LIVE_PROMPT}\n\nCurrent context: threadId=${context.threadId ?? "none"}, projectId=${context.projectId ?? "none"}${context.onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`,
+    instructions: LIVE_PROMPT,
     audio: { output: { voice: config.voice } },
-    delegation: { type: "responses", responses: { model: config.backendModel, instructions: backendInstructions, tools: toolSchemas(pluginCommands, { delegate: config.delegate }), tool_choice: "auto", parallel_tool_calls: false, reasoning: { effort: "low" } } },
+    delegation: {
+      type: "responses",
+      responses: {
+        model: config.backendModel,
+        instructions: backendInstructions,
+        tools: toolSchemas(pluginCommands, { delegate: config.delegate }),
+        tool_choice: "auto",
+        parallel_tool_calls: false,
+        reasoning: { effort: "low" },
+      },
+    },
   };
 }
 
@@ -1669,24 +1701,25 @@ export default async function plugin(bb: BbPluginApi) {
       };
       return {
         hasMore,
-        sessions: page.map((row) => ({
-          id: row.id,
-          startedAt: row.startedAt,
-          lastEventAt: row.lastEventAt,
-          events: row.events,
+        sessions: page.map((row) => {
+          const usage = costStmt.get(row.id) as SessionUsageRow | undefined;
+          return {
+            id: row.id,
+            startedAt: row.startedAt,
+            lastEventAt: row.lastEventAt,
+            events: row.events,
           // Ended if it logged session.stopped, OR it went quiet long ago: a
           // call that dies uncleanly (page unload, torn-down WebRTC on
           // navigation, app killed on mobile) never logs session.stopped, so
           // without this stale check every crashed session shows "live" forever.
           // The active window overrides this to keep a genuinely live call live.
-          ended: row.stopped > 0 || Date.now() - row.lastEventAt > 300_000,
-          costUsd: Number((sessionCostUsd((costStmt.get(row.id) as SessionUsageRow | undefined) ?? {
-            session_id: row.id, backend_model: DEFAULT_BACKEND_MODEL, seconds: 0, backend_input: 0, backend_cached: 0, backend_output: 0, updated_at: 0,
-          })).toFixed(4)),
-          preview: preview(row.id),
-          hasError: errorStmt.get(row.id) !== undefined,
-          device: device(row.id),
-        })),
+            ended: row.stopped > 0 || Date.now() - row.lastEventAt > 300_000,
+            costUsd: usage ? Number(sessionCostUsd(usage).toFixed(4)) : 0,
+            preview: preview(row.id),
+            hasError: errorStmt.get(row.id) !== undefined,
+            device: device(row.id),
+          };
+        }),
       };
     },
     async getSessionEvents({ sessionId }) {

@@ -134,37 +134,124 @@ function Group({ label, hint, children }: { label: string; hint?: string; childr
 // Models: credential status + Live model + voice.
 // ---------------------------------------------------------------------------
 
-interface CredentialStatus { source: "settings" | "env" | "none" }
+interface CredentialStatus {
+  source: "settings" | "env" | "none";
+}
 
 function CredentialCard() {
   const rpc = useRpc<typeof rpcContract>();
   const [status, setStatus] = useState<CredentialStatus | null>(null);
-  const refetch = useCallback(() => rpc.call("getCredentialStatus", null).then(setStatus, () => undefined), [rpc]);
-  useEffect(() => { void refetch(); }, [refetch]);
+  const refetch = useCallback(
+    () => rpc.call("getCredentialStatus", null).then(setStatus, () => undefined),
+    [rpc],
+  );
+  useEffect(() => {
+    void refetch();
+  }, [refetch]);
   useRealtime("config-changed", refetch);
-  useEffect(() => { const id = setInterval(refetch, 2500); return () => clearInterval(id); }, [refetch]);
-  const statusText = status?.source === "settings" ? "Using the API key from Handsfree settings" : status?.source === "env" ? "Using OPENAI_API_KEY from the bb server environment" : status?.source === "none" ? "No API key yet" : "Checking…";
+  useEffect(() => {
+    const id = setInterval(refetch, 2500);
+    return () => clearInterval(id);
+  }, [refetch]);
+  const statusText =
+    status?.source === "settings"
+      ? "Using the API key from Handsfree settings"
+      : status?.source === "env"
+        ? "Using OPENAI_API_KEY from the bb server environment"
+        : status?.source === "none"
+          ? "No API key yet"
+          : "Checking…";
+
   async function removeKey() {
-    try { await rpc.call("clearApiKey", null); refetch(); toast.success("API key removed"); }
-    catch (cause) { toast.error(`Could not remove key: ${cause instanceof Error ? cause.message : String(cause)}`); }
+    try {
+      await rpc.call("clearApiKey", null);
+      refetch();
+      toast.success("API key removed");
+    } catch (cause) {
+      toast.error(`Could not remove key: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
   }
-  return <div className="space-y-1 rounded-md border border-border bg-muted/30 px-3 py-2">
-    <div className="flex items-center justify-between gap-3"><span className="flex items-center gap-2"><span className={cn("size-2 shrink-0 rounded-full", status && status.source !== "none" ? "bg-primary" : "bg-destructive/80")} /><span className="text-sm text-foreground">{statusText}</span></span>{status?.source === "settings" ? <Button type="button" variant="outline" size="sm" onClick={() => void removeKey()}>Remove API key</Button> : null}</div>
-    {status?.source === "none" ? <p className="text-xs italic text-muted-foreground">Add an API key above.</p> : null}
-  </div>;
+
+  return (
+    <div className="space-y-1 rounded-md border border-border bg-muted/30 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2">
+          <span
+            className={cn(
+              "size-2 shrink-0 rounded-full",
+              status && status.source !== "none" ? "bg-primary" : "bg-destructive/80",
+            )}
+          />
+          <span className="text-sm text-foreground">{statusText}</span>
+        </span>
+        {status?.source === "settings" ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => void removeKey()}>
+            Remove API key
+          </Button>
+        ) : null}
+      </div>
+      {status?.source === "none" ? (
+        <p className="text-xs italic text-muted-foreground">Add an API key above.</p>
+      ) : null}
+    </div>
+  );
 }
+
+const BACKEND_MODEL_LABELS: Record<BackendModel, string> = {
+  "gpt-5.6-terra": "GPT-5.6 Terra (recommended)",
+  "gpt-5.6-luna": "GPT-5.6 Luna (fastest, cheapest)",
+  "gpt-5.6-sol": "GPT-5.6 Sol (strongest)",
+};
 
 export function ModelsSettings() {
   const { config, update } = useVoiceConfig();
   const backendModel = config?.backendModel ?? DEFAULT_BACKEND_MODEL;
   const voice = config?.voice ?? DEFAULT_VOICE;
   const loading = config === null;
-  return <div className="space-y-4">
-    <CredentialCard />
-    <p className="text-sm text-muted-foreground">Voice model: {LIVE_MODEL} · $0.05 per minute of call time</p>
-    <label className="block space-y-1"><span className="text-sm font-medium text-foreground">Backend model</span><select value={backendModel} disabled={loading} onChange={(event) => { if (isBackendModel(event.target.value)) void update({ backendModel: event.target.value }); }} className={selectClass}>{BACKEND_MODEL_OPTIONS.map((option) => <option key={option} value={option}>{option === "gpt-5.6-terra" ? "GPT-5.6 Terra (recommended)" : option === "gpt-5.6-luna" ? "GPT-5.6 Luna (fastest, cheapest)" : "GPT-5.6 Sol (strongest)"}</option>)}</select></label>
-    <label className="block space-y-1"><span className="text-sm font-medium text-foreground">Voice</span><select value={voice} disabled={loading} onChange={(event) => { if (isVoice(event.target.value)) void update({ voice: event.target.value }); }} className={selectClass}>{VOICE_OPTIONS.map((option) => <option key={option} value={option}>{voiceLabel(option)}{VOICE_DESCRIPTIONS[option] ? ` — ${VOICE_DESCRIPTIONS[option]}` : ""}</option>)}</select></label>
-  </div>;
+
+  return (
+    <div className="space-y-4">
+      <CredentialCard />
+      <p className="text-sm text-muted-foreground">
+        Voice model: {LIVE_MODEL} · $0.05 per minute of call time
+      </p>
+      <label className="block space-y-1">
+        <span className="text-sm font-medium text-foreground">Backend model</span>
+        <select
+          value={backendModel}
+          disabled={loading}
+          onChange={(event) => {
+            if (isBackendModel(event.target.value)) void update({ backendModel: event.target.value });
+          }}
+          className={selectClass}
+        >
+          {BACKEND_MODEL_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {BACKEND_MODEL_LABELS[option]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="block space-y-1">
+        <span className="text-sm font-medium text-foreground">Voice</span>
+        <select
+          value={voice}
+          disabled={loading}
+          onChange={(event) => {
+            if (isVoice(event.target.value)) void update({ voice: event.target.value });
+          }}
+          className={selectClass}
+        >
+          {VOICE_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {voiceLabel(option)}
+              {VOICE_DESCRIPTIONS[option] ? ` — ${VOICE_DESCRIPTIONS[option]}` : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
