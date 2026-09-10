@@ -214,61 +214,21 @@ test("reloads audio preferences saved by another browser window", () => {
   }
 });
 
-test("grounds a thread notification in the latest completed result", () => {
-  const { logText, instruction } = formatThreadNotices([
-    {
-      kind: "idle",
-      threadId: "thr_settings",
-      title: "Install BB Handsfree version",
-      detail: "Updated the notification prompt and reloaded Handsfree.",
-    },
-  ]);
-
+test("formats named thread notification content", () => {
+  const { logText, content } = formatThreadNotices([{ kind: "idle", threadId: "thr_settings", title: "Install BB Handsfree version", detail: "Updated the notification prompt and reloaded Handsfree." }]);
   assert.match(logText, /Updated the notification prompt/);
-  assert.match(instruction, /latest_result: "Updated the notification prompt/);
-  assert.match(instruction, /Ground the summary only in latest_result/);
-  assert.match(instruction, /Never guess from earlier conversation/);
-  assert.match(instruction, /every announcement must name its thread: start with the title/);
+  assert.match(content, /Thread "Install BB Handsfree version" finished: Updated the notification prompt/);
 });
 
-test("names every thread in a multi-thread digest so 'it finished' is never ambiguous", () => {
-  const { logText, instruction } = formatThreadNotices([
-    {
-      kind: "idle",
-      threadId: "thr_review",
-      title: "Review recent GitHub pull requests",
-      detail: "Both pull requests landed on main.",
-    },
-    {
-      kind: "failed",
-      threadId: "thr_vsix",
-      title: "Enable one-click plugin distribution",
-      detail: "Build script exited with status 1.",
-    },
+test("formats multi-thread and unavailable notifications", () => {
+  const { content } = formatThreadNotices([
+    { kind: "idle", threadId: "thr_review", title: "Review recent GitHub pull requests", detail: "Both pull requests landed on main." },
+    { kind: "failed", threadId: "thr_vsix", title: "Enable one-click plugin distribution", detail: "Build script exited with status 1." },
   ]);
-
-  assert.match(logText, /finished: Review recent GitHub pull requests/);
-  assert.match(logText, /failed: Enable one-click plugin distribution/);
-  assert.match(instruction, /title: "Review recent GitHub pull requests"/);
-  assert.match(instruction, /title: "Enable one-click plugin distribution"/);
-  assert.match(instruction, /every announcement must name its thread: start with the title/);
-  assert.match(instruction, /"<title> finished: <summary>" or "<title> failed: <summary>"/);
-  assert.match(instruction, /Never say just "it finished"/);
-  assert.match(instruction, /A few short sentences per update at most/);
-});
-
-test("requires reading the thread when a completion has no result", () => {
-  const { instruction } = formatThreadNotices([
-    {
-      kind: "idle",
-      threadId: "thr_missing",
-      title: "Background task",
-      detail: null,
-    },
-  ]);
-
-  assert.match(instruction, /latest_result: unavailable/);
-  assert.match(instruction, /call read_thread with that thread_id before speaking/);
+  assert.match(content, /Thread "Review recent GitHub pull requests" finished:/);
+  assert.match(content, /Thread "Enable one-click plugin distribution" failed:/);
+  const unavailable = formatThreadNotices([{ kind: "idle", threadId: "thr_missing", title: "Background task", detail: null }]);
+  assert.match(unavailable.content, /no result text; ask me to read it if you want details/);
 });
 
 test("stopping during the SDP exchange closes the mic and cancels startup", async () => {

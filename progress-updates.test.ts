@@ -25,14 +25,12 @@ async function settleTick() {
 }
 
 function scheduleHarness(fetchActivity: UpdateScheduleDeps["fetchActivity"]) {
-  const delivered: { instruction: string; logText: string }[] = [];
+  const delivered: { content: string; logText: string }[] = [];
   const logs: { kind: string; payload?: Record<string, unknown> }[] = [];
-  let deliverable = true;
   let now = 100_000;
   const schedule = new UpdateSchedule({
     fetchActivity,
-    deliver: (instruction, logText) => delivered.push({ instruction, logText }),
-    canDeliver: () => deliverable,
+    deliver: (content, logText) => delivered.push({ content, logText }),
     log: (kind, payload) => logs.push({ kind, payload }),
     now: () => now,
   });
@@ -40,9 +38,6 @@ function scheduleHarness(fetchActivity: UpdateScheduleDeps["fetchActivity"]) {
     schedule,
     delivered,
     logs,
-    setDeliverable(value: boolean) {
-      deliverable = value;
-    },
     setNow(value: number) {
       now = value;
     },
@@ -55,11 +50,8 @@ test("formatProgressUpdate grounds the spoken instruction and maps terminal stat
     "whether CI passes",
   );
 
-  assert.match(update.instruction, /title: "Fix the build"/);
-  assert.match(update.instruction, /status: failed/);
-  assert.match(update.instruction, /focus: "whether CI passes"/);
-  assert.match(update.instruction, /summary: "test command failed"/);
-  assert.match(update.instruction, /otherwise do not mention that nothing is needed/);
+  assert.match(update.content, /Progress on "Fix the build": test command failed/);
+  assert.match(update.content, /thread failed; updates have stopped/);
   assert.match(update.logText, /Progress update — Fix the build: test command failed/);
 });
 
@@ -96,37 +88,6 @@ test("first tick uses sinceMs and later ticks continue from the cursor", async (
   }
 });
 
-test("delivery waits while busy, skips ticks while pending, and flushes when quiet", async () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  try {
-    let fetches = 0;
-    const harness = scheduleHarness(async () => {
-      fetches += 1;
-      return liveResult();
-    });
-    harness.setDeliverable(false);
-    harness.schedule.start({ threadId: "thr_work", intervalMs: 1_000, focus: null });
-
-    mock.timers.tick(1_000);
-    await settleTick();
-    assert.equal(fetches, 1);
-    assert.equal(harness.delivered.length, 0);
-    assert.equal(harness.schedule.hasPending(), true);
-
-    mock.timers.tick(1_000);
-    await settleTick();
-    assert.equal(fetches, 1);
-
-    harness.setDeliverable(true);
-    harness.schedule.flush();
-    assert.equal(harness.delivered.length, 1);
-    assert.equal(harness.schedule.hasPending(), false);
-    assert.match(harness.delivered[0].instruction, /The agent updated the tests/);
-  } finally {
-    mock.timers.reset();
-  }
-});
-
 test("a non-live result delivers the final update and stops", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
@@ -137,7 +98,7 @@ test("a non-live result delivers the final update and stops", async () => {
     await settleTick();
 
     assert.equal(harness.delivered.length, 1);
-    assert.match(harness.delivered[0].instruction, /status: finished/);
+    assert.match(harness.delivered[0].content, /thread has finished; updates have stopped/);
     assert.equal(harness.schedule.isActive(), false);
     assert.deepEqual(harness.logs.at(-1), {
       kind: "updates.stopped",
@@ -216,7 +177,7 @@ test("three consecutive failures speak an explanation and stop", async () => {
 
     assert.equal(harness.logs.filter((entry) => entry.kind === "updates.tick.failed").length, 3);
     assert.equal(harness.delivered.length, 1);
-    assert.match(harness.delivered[0].instruction, /could not fetch thread activity after three attempts/);
+    assert.equal(harness.delivered[0].content, "Progress updates stopped: bb could not fetch thread activity.");
     assert.equal(harness.schedule.isActive(), false);
     assert.deepEqual(harness.logs.at(-1)?.payload, { reason: "failed" });
   } finally {
