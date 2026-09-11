@@ -102,7 +102,7 @@ test("explicit relay to another thread still stages", async () => {
   assert.equal(calls.filter((call) => call.method === "runTool").length, 0);
 });
 
-test("observeView adopts route changes but ignores same-thread updates", async () => {
+test("observeView adopts route changes, including a project change on the same thread", async () => {
   const { agent, calls } = agentWithRpcSpy();
   const dc = { readyState: "open", send() {} } as unknown as RTCDataChannel;
   const internals = agent as unknown as {
@@ -117,7 +117,7 @@ test("observeView adopts route changes but ignores same-thread updates", async (
     call_id: "same",
     arguments: JSON.stringify({ explicit: true, message: "one" }),
   });
-  assert.equal((calls.find((call) => call.method === "runTool")?.args as { projectId: string }).projectId, "proj_one");
+  assert.equal((calls.find((call) => call.method === "runTool")?.args as { projectId: string }).projectId, "proj_two");
   agent.observeView({ threadId: "thr_two", projectId: "proj_two" });
   await internals.handleToolCall(dc, {
     name: "send_to_thread",
