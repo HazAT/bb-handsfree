@@ -241,13 +241,18 @@ async function liveAgentHarness() {
     getTracks: () => [track],
     getAudioTracks: () => [track],
   } as unknown as MediaStream;
-  const dc = {
-    readyState: "open",
-    onmessage: null as ((message: { data: string }) => void) | null,
-    onclose: null as (() => void) | null,
-    send(data: string) { calls.push({ method: "send", args: JSON.parse(data) }); },
-    close() { this.readyState = "closed"; this.onclose?.(); },
-  } as unknown as RTCDataChannel & { onmessage: ((message: { data: string }) => void) | null };
+  type FakeChannel = RTCDataChannel & { onmessage: ((message: { data: string }) => void) | null };
+  // One fake channel per session, so a test can drive a stopped session's
+  // channel and a live one side by side.
+  const channels: FakeChannel[] = [];
+  const makeChannel = () =>
+    ({
+      readyState: "open",
+      onmessage: null as ((message: { data: string }) => void) | null,
+      onclose: null as (() => void) | null,
+      send(data: string) { calls.push({ method: "send", args: JSON.parse(data) }); },
+      close() { this.readyState = "closed"; this.onclose?.(); },
+    }) as unknown as FakeChannel;
   class FakePeerConnection {
     iceGatheringState = "complete";
     connectionState = "new";
@@ -260,7 +265,11 @@ async function liveAgentHarness() {
     removeEventListener() {}
     close() {}
     getSenders() { return []; }
-    createDataChannel() { return dc; }
+    createDataChannel() {
+      const channel = makeChannel();
+      channels.push(channel);
+      return channel;
+    }
     async createOffer() { return { type: "offer" as const, sdp: "offer" }; }
     async setLocalDescription(description: RTCSessionDescriptionInit) { this.localDescription = description; }
     async setRemoteDescription() {}
@@ -289,13 +298,19 @@ async function liveAgentHarness() {
     context: { threadId: null, projectId: null, onNewThreadScreen: false },
     openNewThread() {},
   });
-  agent.toggle();
-  await new Promise((resolve) => setImmediate(resolve));
-  dc.onmessage?.({ data: JSON.stringify({ type: "session.started", session: { id: "live-test" } }) });
+  const start = async () => {
+    agent.toggle();
+    await new Promise((resolve) => setImmediate(resolve));
+    const channel = channels[channels.length - 1];
+    channel.onmessage?.({ data: JSON.stringify({ type: "session.started", session: { id: "live-test" } }) });
+    return channel;
+  };
+  const dc = await start();
   return {
     agent,
     dc,
     calls,
+    start,
     cleanup() {
       agent.stop();
       if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
@@ -364,6 +379,59 @@ test("records Live usage snapshots and closes on session.closed", async () => {
       { sessionId, seconds: 42 },
       { sessionId, seconds: 61 },
     ]);
+    assert.equal(agent.getState(), "idle");
+  } finally {
+    cleanup();
+  }
+});
+
+test("events from a stopped session's channel never reach the next session", async () => {
+  const { agent, dc: oldDc, calls, start, cleanup } = await liveAgentHarness();
+  const internals = agent as unknown as {
+    handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
+  };
+  try {
+    agent.stop(); // drains: session.close sent, channel still open
+    const newDc = await start();
+    assert.equal(agent.getState(), "live");
+    await internals.handleToolCall(newDc, {
+      name: "send_to_thread",
+      call_id: "stage",
+      arguments: JSON.stringify({ thread_id: "thr", message: "do it" }),
+    });
+    // The old channel keeps talking: a user turn and even a fresh session.started.
+    oldDc.onmessage?.({
+      data: JSON.stringify({ type: "session.input_transcript.delta", delta: "yes", start_ms: 0, end_ms: 400 }),
+    });
+    oldDc.onmessage?.({ data: JSON.stringify({ type: "session.started", session: { id: "stale" } }) });
+    await internals.handleToolCall(newDc, { name: "confirm_pending", call_id: "confirm", arguments: "{}" });
+    const reply = calls
+      .filter((call) => call.method === "send")
+      .map((call) => call.args as { item?: { call_id?: string; output?: string } })
+      .find((sent) => sent.item?.call_id === "confirm");
+    assert.match(reply?.item?.output ?? "", /has not answered/);
+    assert.equal(calls.filter((call) => call.method === "runTool").length, 0);
+    assert.equal(agent.getState(), "live");
+  } finally {
+    cleanup();
+  }
+});
+
+test("session.closed on a draining channel records usage and finalizes at once", async () => {
+  const { agent, dc, calls, cleanup } = await liveAgentHarness();
+  try {
+    const sessionId = agent.getSessionId();
+    agent.stop();
+    const last = calls.filter((call) => call.method === "send").at(-1)?.args as { type?: string };
+    assert.equal(last?.type, "session.close");
+    assert.equal(dc.readyState, "open"); // waiting for the acknowledgment
+    dc.onmessage?.({
+      data: JSON.stringify({ type: "session.closed", reason: "close_requested", usage: { seconds: 61 } }),
+    });
+    assert.equal(dc.readyState, "closed"); // torn down synchronously, not after the timer
+    await new Promise((resolve) => setImmediate(resolve));
+    const usage = calls.filter((call) => call.method === "recordUsage").map((call) => call.args);
+    assert.deepEqual(usage, [{ sessionId, seconds: 61 }]);
     assert.equal(agent.getState(), "idle");
   } finally {
     cleanup();
