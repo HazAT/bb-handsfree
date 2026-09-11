@@ -70,9 +70,18 @@ let closeTimer;
 let outTranscript = "";
 let finalBackendText = false;
 let voiceSeconds;
-let backendInput;
-let backendOutput;
+let backendInput = 0;
+let backendCached = 0;
+let backendOutput = 0;
+let harnessSessionId;
 let timeout;
+
+function recordUsage(method, input) {
+  if (!flags.tools || !harnessSessionId) return;
+  void rpc(method, input).catch((error) => {
+    if (flags.debug) console.error(`[debug] ${method} failed: ${error.message}`);
+  });
+}
 
 function fail(message) {
   if (finished) return;
@@ -119,6 +128,7 @@ ws.addEventListener("message", async (event) => {
     return;
   }
   if (data.type === "session.started") {
+    harnessSessionId = `harness-${data.session?.id}`;
     const chunk = Buffer.alloc(4800).toString("base64");
     silence = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) send({ type: "session.input_audio.append", audio: chunk });
@@ -134,12 +144,14 @@ ws.addEventListener("message", async (event) => {
   }
   if (data.type === "session.usage.updated") {
     voiceSeconds = data.usage?.seconds;
+    recordUsage("recordUsage", { sessionId: harnessSessionId, seconds: Number(voiceSeconds ?? 0) });
     return;
   }
   if (data.type === "session.closed") {
     finished = true;
     clearInterval(silence);
     voiceSeconds = data.usage?.seconds ?? voiceSeconds;
+    recordUsage("recordUsage", { sessionId: harnessSessionId, seconds: Number(voiceSeconds ?? 0) });
     console.error(`[${elapsed()}] session.closed usage=${JSON.stringify(data.usage ?? {})}`);
     ws.close();
     return;
@@ -172,8 +184,18 @@ ws.addEventListener("message", async (event) => {
   if (inner.type === "response.completed") {
     const usage = inner.response?.usage;
     if (usage) {
-      backendInput = usage.input_tokens;
-      backendOutput = usage.output_tokens;
+      const input = Number(usage.input_tokens ?? 0);
+      const cached = Number(usage.input_tokens_details?.cached_tokens ?? 0);
+      const output = Number(usage.output_tokens ?? 0);
+      backendInput += input;
+      backendCached += cached;
+      backendOutput += output;
+      recordUsage("recordBackendUsage", {
+        sessionId: harnessSessionId,
+        input,
+        cached,
+        output,
+      });
     }
   }
 });
@@ -182,7 +204,7 @@ timeout = setTimeout(() => fail("timeout after 60s"), 60_000);
 process.on("exit", () => {
   if (outTranscript) console.error(`[aide] ${outTranscript}`);
   if (voiceSeconds !== undefined || backendInput !== undefined) {
-    console.error(`[usage] seconds=${voiceSeconds ?? "?"} backend in/out=${backendInput ?? "?"}/${backendOutput ?? "?"}`);
+    console.error(`[usage] seconds=${voiceSeconds ?? "?"} backend in/cached/out=${backendInput}/${backendCached}/${backendOutput}`);
   }
   if (!finalBackendText && !finished) process.exitCode = 1;
 });

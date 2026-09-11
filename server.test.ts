@@ -217,6 +217,12 @@ test("the Live session sends Responses delegation and returns its session id", a
   assert.ok(!secondBody.session.delegation.responses.tools.some((tool: { name: string }) => tool.name === "delegate"));
   assert.doesNotMatch(secondBody.session.delegation.responses.instructions, /delegate tool hands it a task/);
   assert.match(secondBody.session.delegation.responses.instructions, /When the user asks to be kept posted/);
+
+  await host.harness.callRpc("setConfig", { backendModel: "gpt-5.6-luna" });
+  await host.harness.callRpc("recordBackendUsage", { sessionId: "n1", input: 1_000_000, cached: 0, output: 0 });
+  await host.harness.callRpc("logEvent", { sessionId: "n1", kind: "session.started", payload: {} });
+  const sessions = await host.harness.callRpc("listSessions", { offset: 0 }) as { sessions: { id: string; costUsd: number }[] };
+  assert.equal(sessions.sessions.find((session) => session.id === "n1")?.costUsd, 2);
 });
 
 test("Live usage replaces seconds, accumulates backend tokens, and calculates cost", async () => {

@@ -109,6 +109,8 @@ interface SessionHandle {
   micSender: RTCRtpSender | null;
   /** Tears down the page/visibility listeners installed for this session. */
   disposeLifecycle?: () => void;
+  /** Finalizes a session that is draining after stop(). */
+  finalize: (() => void) | null;
 }
 
 /**
@@ -975,12 +977,18 @@ export class VoiceAgent {
     if (endedNonce) this.broadcastPresence("idle", endedNonce);
     if (!session) return;
     if (shouldDefer) {
-      session.dc!.send(JSON.stringify({ type: "session.close" }));
-      const timer = setTimeout(() => this.teardown(session), 2000);
-      session.dc!.onclose = () => {
-        clearTimeout(timer);
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      session.finalize = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        if (session.dc) session.dc.onclose = null;
         this.teardown(session);
       };
+      session.dc!.send(JSON.stringify({ type: "session.close" }));
+      timer = setTimeout(() => session.finalize?.(), 2000);
+      session.dc!.onclose = () => session.finalize?.();
     } else this.teardown(session);
   }
 
@@ -1186,6 +1194,7 @@ export class VoiceAgent {
         micTrack: null,
         micSender: null,
         closed: false,
+        finalize: null,
       };
       this.session = session;
       // Never stay "connecting" forever: if the data channel hasn't opened in
@@ -1249,6 +1258,14 @@ export class VoiceAgent {
         let event: Record<string, unknown>;
         try { event = JSON.parse(String(message.data)); } catch { return; }
         const type = String(event.type ?? "");
+        if (this.session !== session) {
+          if (type === "session.closed") {
+            const usage = event.usage as { seconds?: number } | undefined;
+            if (usage) this.recordSeconds(nonce, Number(usage.seconds ?? 0));
+            session.finalize?.();
+          }
+          return;
+        }
         if (type === "session.started") {
           this.clearConnectWatchdog();
           this.liveStartedAt = Date.now();
@@ -1293,10 +1310,10 @@ export class VoiceAgent {
             }
           } else if (inner?.type === "response.completed") {
             const usage = (inner.response as { usage?: Record<string, unknown> } | undefined)?.usage;
-            if (usage && this.nonce) {
+            if (usage) {
               void this.bindings?.rpc
                 .call("recordBackendUsage", {
-                  sessionId: this.nonce,
+                  sessionId: nonce,
                   input: Number(usage.input_tokens ?? 0),
                   cached: Number(
                     (usage.input_tokens_details as { cached_tokens?: number } | undefined)

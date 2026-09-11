@@ -54,6 +54,11 @@ test("formatProgressUpdate grounds the spoken instruction and maps terminal stat
   assert.match(update.logText, /Progress update — Fix the build: test command failed/);
 });
 
+test("formatProgressUpdate bounds the final commentary", () => {
+  const update = formatProgressUpdate(liveResult({ summary: "x".repeat(1600) }));
+  assert.equal(update.content.length, 1500);
+});
+
 test("first tick uses sinceMs and later ticks continue from the cursor", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {

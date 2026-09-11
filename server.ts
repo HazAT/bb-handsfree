@@ -1511,6 +1511,9 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(`OpenAI live session failed: ${response.status} ${response.statusText}`);
       }
       const json = JSON.parse(text) as { session: { id: string }; transport: { sdp: string } };
+      db.prepare(
+        "INSERT OR IGNORE INTO session_usage (session_id, backend_model, seconds, backend_input, backend_cached, backend_output, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?)",
+      ).run(nonce, config.backendModel, Date.now());
       bb.realtime.publish("voice-call", { nonce });
       return { sdp: json.transport.sdp, sessionId: json.session.id };
     },
@@ -1744,13 +1747,11 @@ export default async function plugin(bb: BbPluginApi) {
       return { events };
     },
     async recordUsage({ sessionId, seconds }) {
-      const { backendModel } = await readConfig();
-      db.prepare(`INSERT INTO session_usage (session_id, backend_model, seconds, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET seconds = excluded.seconds, updated_at = excluded.updated_at`).run(sessionId, backendModel, seconds, Date.now());
+      db.prepare(`INSERT INTO session_usage (session_id, backend_model, seconds, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET seconds = excluded.seconds, updated_at = excluded.updated_at`).run(sessionId, DEFAULT_BACKEND_MODEL, seconds, Date.now());
       return { ok: true as const };
     },
     async recordBackendUsage({ sessionId, input, cached, output }) {
-      const { backendModel } = await readConfig();
-      db.prepare(`INSERT INTO session_usage (session_id, backend_model, backend_input, backend_cached, backend_output, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET backend_input = backend_input + excluded.backend_input, backend_cached = backend_cached + excluded.backend_cached, backend_output = backend_output + excluded.backend_output, updated_at = excluded.updated_at`).run(sessionId, backendModel, input, cached, output, Date.now());
+      db.prepare(`INSERT INTO session_usage (session_id, backend_model, backend_input, backend_cached, backend_output, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET backend_input = backend_input + excluded.backend_input, backend_cached = backend_cached + excluded.backend_cached, backend_output = backend_output + excluded.backend_output, updated_at = excluded.updated_at`).run(sessionId, DEFAULT_BACKEND_MODEL, input, cached, output, Date.now());
       return { ok: true as const };
     },
     async runTool({ name, args, threadId, projectId, onNewThreadScreen, sessionId }) {

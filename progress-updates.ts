@@ -44,7 +44,7 @@ export function formatProgressUpdate(result: ActivityResult): { content: string;
       : " The thread has finished; updates have stopped.";
   }
   return {
-    content,
+    content: content.slice(0, 1500),
     logText: `Progress update — ${result.title}: ${summary}`,
   };
 }
