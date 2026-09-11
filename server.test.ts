@@ -207,7 +207,14 @@ test("the Live session sends Responses delegation and returns its session id", a
   assert.ok(body.session.delegation.responses.tools.some((tool: { name: string }) => tool.name === "delegate"));
   assert.match(body.session.delegation.responses.instructions, /When the user asks to be kept posted/);
   assert.match(body.session.delegation.responses.instructions, /Relaying work is two steps unless/);
+  // The backend must actually call confirm_pending on a yes and never claim success without a tool result.
+  assert.match(body.session.delegation.responses.instructions, /you must call confirm_pending/);
+  assert.match(body.session.delegation.responses.instructions, /Report only what your tools return/);
   assert.doesNotMatch(body.session.instructions, /get_context/);
+  // The live model follows the guide's rule: no claiming an action finished before the backend confirms it.
+  assert.match(body.session.instructions, /never say something was sent, started, stopped, or done/);
+  assert.match(body.session.instructions, /Backchannel policy:/);
+  assert.match(body.session.instructions, /Interruption policy:/);
   const config = await host.harness.callRpc("getSessionConfig", { threadId: null, projectId: PROJECT });
   assert.deepEqual(config, { session: body.session });
 
