@@ -707,17 +707,22 @@ function liveSessionConfig(
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
+  // bb records each statement by index and refuses a changed one, so this list
+  // is append-only: the Realtime-era usage_events table is created and then
+  // dropped by later statements rather than edited out.
   bb.storage.migrate(db, [
-    `DROP TABLE IF EXISTS usage_events`,
-    `CREATE TABLE IF NOT EXISTS session_usage (
-      session_id TEXT PRIMARY KEY,
-      backend_model TEXT NOT NULL,
-      seconds INTEGER NOT NULL DEFAULT 0,
-      backend_input INTEGER NOT NULL DEFAULT 0,
-      backend_cached INTEGER NOT NULL DEFAULT 0,
-      backend_output INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL
+    `CREATE TABLE IF NOT EXISTS usage_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      input_text INTEGER NOT NULL DEFAULT 0,
+      input_audio INTEGER NOT NULL DEFAULT 0,
+      cached_text INTEGER NOT NULL DEFAULT 0,
+      cached_audio INTEGER NOT NULL DEFAULT 0,
+      output_text INTEGER NOT NULL DEFAULT 0,
+      output_audio INTEGER NOT NULL DEFAULT 0
     )`,
+    `ALTER TABLE usage_events ADD COLUMN session_id TEXT`,
     `CREATE TABLE IF NOT EXISTS session_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -740,6 +745,16 @@ export default async function plugin(bb: BbPluginApi) {
       ms INTEGER NOT NULL,
       error TEXT,
       at INTEGER NOT NULL
+    )`,
+    `DROP TABLE IF EXISTS usage_events`,
+    `CREATE TABLE IF NOT EXISTS session_usage (
+      session_id TEXT PRIMARY KEY,
+      backend_model TEXT NOT NULL,
+      seconds INTEGER NOT NULL DEFAULT 0,
+      backend_input INTEGER NOT NULL DEFAULT 0,
+      backend_cached INTEGER NOT NULL DEFAULT 0,
+      backend_output INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
     )`,
   ]);
 
