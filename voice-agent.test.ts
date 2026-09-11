@@ -127,6 +127,43 @@ test("observeView adopts route changes but ignores same-thread updates", async (
   assert.equal((calls.filter((call) => call.method === "runTool")[1].args as { threadId: string }).threadId, "thr_two");
 });
 
+test("an explicit relay to the thread the call started on stages once the view left it", async () => {
+  const { agent, calls } = agentWithRpcSpy();
+  const dc = { readyState: "open", send() {} } as unknown as RTCDataChannel;
+  const internals = agent as unknown as {
+    session: { dc: RTCDataChannel } | null;
+    handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
+  };
+  internals.session = { dc };
+  agent.bind({
+    rpc: { call: (async () => ({ output: "Sent." })) as never },
+    context: { threadId: "thr_bound", projectId: "proj_view", onNewThreadScreen: false },
+    openNewThread() {},
+  });
+  agent.observeView({ threadId: null, projectId: "proj_view" }); // user navigated away from the thread
+  await internals.handleToolCall(dc, {
+    name: "send_to_thread",
+    call_id: "stale",
+    arguments: JSON.stringify({ explicit: true, thread_id: "thr_bound", message: "do it" }),
+  });
+  assert.equal(calls.filter((call) => call.method === "runTool").length, 0);
+});
+
+test("observeView adopts a project change and ignores a surface that sees no project", async () => {
+  const { agent, calls } = agentWithRpcSpy();
+  const dc = { readyState: "open", send() {} } as unknown as RTCDataChannel;
+  const internals = agent as unknown as {
+    session: { dc: RTCDataChannel } | null;
+    handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
+  };
+  internals.session = { dc };
+  agent.observeView({ threadId: null, projectId: "proj_a" });
+  agent.observeView({ threadId: null, projectId: null }); // e.g. the sidebar on the New thread screen
+  agent.observeView({ threadId: null, projectId: "proj_b" });
+  await internals.handleToolCall(dc, { name: "list_projects", call_id: "ctx", arguments: "{}" });
+  assert.equal((calls.find((call) => call.method === "runTool")?.args as { projectId: string }).projectId, "proj_b");
+});
+
 test("a tool call from an ended session can't stage into the next session's gate", async () => {
   const { agent, calls } = agentWithRpcSpy();
   const fakeDc = () =>

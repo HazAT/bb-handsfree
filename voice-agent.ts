@@ -363,8 +363,19 @@ export class VoiceAgent {
     this.helloOnce("composer");
   }
 
+  /**
+   * Any mounted surface reports the route here. A thread change always wins;
+   * with the same thread, only a different, known project is adopted — a
+   * surface that sees no project must not blank the composer's scope project
+   * on the New thread screen.
+   */
   observeView(view: { threadId: string | null; projectId: string | null }) {
-    if (this.viewContext === null || view.threadId !== this.viewContext.threadId) this.viewContext = view;
+    const current = this.viewContext;
+    if (current === null || view.threadId !== current.threadId) {
+      this.viewContext = view;
+    } else if (view.projectId && view.projectId !== current.projectId) {
+      this.viewContext = view;
+    }
   }
 
   /**
@@ -1070,7 +1081,8 @@ export class VoiceAgent {
       output =
         "Opened the New thread screen with the project preselected. The user will type the prompt themselves; no thread exists yet.";
     } else if (CONFIRMED_TOOLS.has(name)) {
-      if (!needsConfirmation(name, args, this.viewContext?.threadId ?? bindings.context.threadId)) {
+      const view = this.viewContext ?? bindings.context;
+      if (!needsConfirmation(name, args, view.threadId)) {
         output = await this.runServerTool(name, args);
       } else {
         output = this.confirmationGate.propose(name, args);
