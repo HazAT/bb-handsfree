@@ -186,6 +186,7 @@ relay after the user confirms it).
 Dev loop:
 
 ```sh
+bb plugin dev               # rebuild + reload on save
 bb plugin logs handsfree -f # tool traffic and errors
 node scripts/text-session.mjs "what's running right now?" # Live smoke test
 ```

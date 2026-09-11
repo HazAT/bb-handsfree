@@ -1,7 +1,7 @@
 // bb-plugin-handsfree — frontend: a voice-agent toggle in the composer.
 //
 // A circular waveform button rendered beside the native mic/submit controls.
-// Clicking it opens a WebRTC session with the OpenAI Realtime API (mic capture
+// Clicking it opens a WebRTC session with the OpenAI GPT-Live API (mic capture
 // and audio playback happen right here in the bb app); the backend performs
 // the SDP exchange (it holds the API key) and executes bb tools via bb.sdk.
 // The session itself lives in voice-agent.ts and outlives any component.

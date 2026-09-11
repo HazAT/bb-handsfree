@@ -1,4 +1,4 @@
-// bb-plugin-handsfree — Aide: a realtime voice operator for bb.
+// bb-plugin-handsfree — Aide: a voice operator for bb on GPT-Live.
 //
 // The frontend (app.tsx) captures mic audio over WebRTC directly in the bb
 // app; this backend holds the OpenAI API key, creates GPT-Live sessions through
@@ -35,7 +35,7 @@ const shortcutsSchema = z
   .strict();
 
 export const rpcContract = defineRpcContract({
-  /** Exchange a WebRTC SDP offer with OpenAI Realtime. Returns the answer. */
+  /** Create a GPT-Live session from a WebRTC SDP offer. Returns the answer and session id. */
   createCall: {
     input: z
       .object({
