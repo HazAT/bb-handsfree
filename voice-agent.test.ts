@@ -231,6 +231,145 @@ test("formats multi-thread and unavailable notifications", () => {
   assert.match(unavailable.content, /no result text; ask me to read it if you want details/);
 });
 
+async function liveAgentHarness() {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const originalPeerConnection = Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection");
+  const originalAudio = Object.getOwnPropertyDescriptor(globalThis, "Audio");
+  const calls: { method: string; args: unknown }[] = [];
+  const track = { enabled: true, stop() {} };
+  const stream = {
+    getTracks: () => [track],
+    getAudioTracks: () => [track],
+  } as unknown as MediaStream;
+  const dc = {
+    readyState: "open",
+    onmessage: null as ((message: { data: string }) => void) | null,
+    onclose: null as (() => void) | null,
+    send(data: string) { calls.push({ method: "send", args: JSON.parse(data) }); },
+    close() { this.readyState = "closed"; this.onclose?.(); },
+  } as unknown as RTCDataChannel & { onmessage: ((message: { data: string }) => void) | null };
+  class FakePeerConnection {
+    iceGatheringState = "complete";
+    connectionState = "new";
+    localDescription: RTCSessionDescriptionInit | null = null;
+    ontrack: ((event: RTCTrackEvent) => void) | null = null;
+    onconnectionstatechange: (() => void) | null = null;
+    oniceconnectionstatechange: (() => void) | null = null;
+    addTrack() {}
+    addEventListener() {}
+    removeEventListener() {}
+    close() {}
+    getSenders() { return []; }
+    createDataChannel() { return dc; }
+    async createOffer() { return { type: "offer" as const, sdp: "offer" }; }
+    async setLocalDescription(description: RTCSessionDescriptionInit) { this.localDescription = description; }
+    async setRemoteDescription() {}
+  }
+  class FakeAudio {
+    autoplay = false;
+    srcObject: MediaStream | null = null;
+    async play() {}
+    remove() {}
+  }
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { mediaDevices: {
+      getUserMedia: async () => stream,
+      enumerateDevices: async () => [{ deviceId: "mic-1", kind: "audioinput", label: "Built-in Mic" }],
+    } },
+  });
+  Object.defineProperty(globalThis, "RTCPeerConnection", { configurable: true, value: FakePeerConnection });
+  Object.defineProperty(globalThis, "Audio", { configurable: true, value: FakeAudio });
+  const agent = new VoiceAgent();
+  agent.bind({
+    rpc: { call: (async (method: string, args: unknown) => {
+      calls.push({ method, args });
+      return method === "createCall" ? { sdp: "answer", sessionId: "live-test" } : { output: "Sent." };
+    }) as never },
+    context: { threadId: null, projectId: null, onNewThreadScreen: false },
+    openNewThread() {},
+  });
+  agent.toggle();
+  await new Promise((resolve) => setImmediate(resolve));
+  dc.onmessage?.({ data: JSON.stringify({ type: "session.started", session: { id: "live-test" } }) });
+  return {
+    agent,
+    dc,
+    calls,
+    cleanup() {
+      agent.stop();
+      if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+      else delete (globalThis as { navigator?: unknown }).navigator;
+      if (originalPeerConnection) Object.defineProperty(globalThis, "RTCPeerConnection", originalPeerConnection);
+      else delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
+      if (originalAudio) Object.defineProperty(globalThis, "Audio", originalAudio);
+      else delete (globalThis as { Audio?: unknown }).Audio;
+    },
+  };
+}
+
+test("transcript timing counts confirmation turns", async () => {
+  const { agent, dc, calls, cleanup } = await liveAgentHarness();
+  const internals = agent as unknown as {
+    handleToolCall(dc: RTCDataChannel, event: Record<string, unknown>): Promise<void>;
+  };
+  const delta = (start_ms: number, end_ms: number) =>
+    dc.onmessage?.({
+      data: JSON.stringify({ type: "session.input_transcript.delta", delta: "yes", start_ms, end_ms }),
+    });
+  const relayed = () => calls.filter((call) => call.method === "runTool");
+  const replyTo = (callId: string) =>
+    calls
+      .filter((call) => call.method === "send")
+      .map((call) => call.args as { item?: { call_id?: string; output?: string } })
+      .find((sent) => sent.item?.call_id === callId);
+  try {
+    await internals.handleToolCall(dc, {
+      name: "send_to_thread",
+      call_id: "stage-1",
+      arguments: JSON.stringify({ thread_id: "thr", message: "do it" }),
+    });
+    // Two fragments 200 ms apart are one spoken turn: the staged call is released.
+    delta(0, 400);
+    delta(600, 800);
+    await internals.handleToolCall(dc, { name: "confirm_pending", call_id: "confirm-1", arguments: "{}" });
+    assert.equal(relayed().length, 1);
+    assert.equal((relayed()[0].args as { name: string }).name, "send_to_thread");
+
+    await internals.handleToolCall(dc, {
+      name: "send_to_thread",
+      call_id: "stage-2",
+      arguments: JSON.stringify({ thread_id: "thr", message: "do it again" }),
+    });
+    // Fragments 1.7 s and 2.4 s apart are two turns: the staged call expires.
+    delta(2500, 2600);
+    delta(5000, 5100);
+    await internals.handleToolCall(dc, { name: "confirm_pending", call_id: "confirm-2", arguments: "{}" });
+    assert.equal(relayed().length, 1);
+    assert.match(replyTo("confirm-2")?.item?.output ?? "", /expired/i);
+  } finally {
+    cleanup();
+  }
+});
+
+test("records Live usage snapshots and closes on session.closed", async () => {
+  const { agent, dc, calls, cleanup } = await liveAgentHarness();
+  try {
+    const sessionId = agent.getSessionId();
+    dc.onmessage?.({ data: JSON.stringify({ type: "session.usage.updated", usage: { seconds: 42 } }) });
+    dc.onmessage?.({ data: JSON.stringify({ type: "session.closed", reason: "close_requested", usage: { seconds: 61 } }) });
+    await new Promise((resolve) => setImmediate(resolve));
+    const usage = calls.filter((call) => call.method === "recordUsage").map((call) => call.args);
+    assert.deepEqual(usage, [
+      { sessionId, seconds: 42 },
+      { sessionId, seconds: 61 },
+    ]);
+    assert.equal(agent.getState(), "idle");
+  } finally {
+    cleanup();
+  }
+});
+
 test("stopping during the SDP exchange closes the mic and cancels startup", async () => {
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const originalPeerConnection = Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection");

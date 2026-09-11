@@ -32,14 +32,17 @@ interface ScheduleState {
 
 const COMPLETION_NOTICE_SUPPRESSION_MS = 30_000;
 
-export function formatProgressUpdate(
-  result: ActivityResult,
-  focus: string | null,
-): { content: string; logText: string } {
+export function formatProgressUpdate(result: ActivityResult): { content: string; logText: string } {
   const status = result.live ? "running" : result.status === "error" ? "failed" : "finished";
-  const summary = (result.summary ?? result.raw ?? "No new activity since the last update.").replace(/\s+/g, " ").trim();
+  const summary = (result.summary ?? result.raw ?? "No new activity since the last update.")
+    .replace(/\s+/g, " ")
+    .trim();
   let content = `Progress on ${JSON.stringify(result.title)}: ${summary}`;
-  if (!result.live) content += status === "failed" ? " The thread failed; updates have stopped." : " The thread has finished; updates have stopped.";
+  if (!result.live) {
+    content += status === "failed"
+      ? " The thread failed; updates have stopped."
+      : " The thread has finished; updates have stopped.";
+  }
   return {
     content,
     logText: `Progress update — ${result.title}: ${summary}`,
@@ -57,7 +60,9 @@ export class UpdateSchedule {
     this.now = deps.now ?? Date.now;
   }
 
-  isActive(): boolean { return this.schedule !== null; }
+  isActive(): boolean {
+    return this.schedule !== null;
+  }
 
   start(options: { threadId: string; intervalMs: number; focus: string | null }) {
     if (this.schedule) this.stop("replaced");
@@ -96,7 +101,10 @@ export class UpdateSchedule {
 
   private arm(schedule: ScheduleState) {
     if (this.schedule !== schedule) return;
-    schedule.timer = setTimeout(() => { schedule.timer = null; void this.tick(schedule); }, schedule.intervalMs);
+    schedule.timer = setTimeout(() => {
+      schedule.timer = null;
+      void this.tick(schedule);
+    }, schedule.intervalMs);
   }
 
   private async tick(schedule: ScheduleState) {
@@ -111,7 +119,7 @@ export class UpdateSchedule {
       if (this.schedule !== schedule) return;
       schedule.failures = 0;
       if (result.cursor !== null) schedule.cursor = result.cursor;
-      const update = formatProgressUpdate(result, schedule.focus);
+      const update = formatProgressUpdate(result);
       this.deps.deliver(update.content, update.logText);
       if (!result.live) {
         this.lastDeliveredTerminal = { threadId: schedule.threadId, at: this.now() };
@@ -120,11 +128,19 @@ export class UpdateSchedule {
     } catch (error) {
       if (this.schedule !== schedule) return;
       schedule.failures += 1;
-      this.deps.log("updates.tick.failed", { failures: schedule.failures, error: error instanceof Error ? error.message : String(error) });
+      this.deps.log("updates.tick.failed", {
+        failures: schedule.failures,
+        error: error instanceof Error ? error.message : String(error),
+      });
       if (schedule.failures >= 3) {
-        this.deps.deliver("Progress updates stopped: bb could not fetch thread activity.", "Progress updates stopped — thread activity could not be fetched.");
+        this.deps.deliver(
+          "Progress updates stopped: bb could not fetch thread activity.",
+          "Progress updates stopped — thread activity could not be fetched.",
+        );
         this.stop("failed");
-      } else this.arm(schedule);
+      } else {
+        this.arm(schedule);
+      }
     }
   }
 }

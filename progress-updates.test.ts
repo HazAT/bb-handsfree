@@ -47,7 +47,6 @@ function scheduleHarness(fetchActivity: UpdateScheduleDeps["fetchActivity"]) {
 test("formatProgressUpdate grounds the spoken instruction and maps terminal status", () => {
   const update = formatProgressUpdate(
     liveResult({ live: false, status: "error", summary: null, raw: "test command failed" }),
-    "whether CI passes",
   );
 
   assert.match(update.content, /Progress on "Fix the build": test command failed/);

@@ -30,6 +30,13 @@ export type VoiceCommandAction = "stop" | "mute" | "unmute";
  * `voice-presence` broadcast so this realm's controls reflect it. `receivedAt`
  * lets us expire a call whose owner realm vanished without a clean stop.
  */
+interface TranscriptState {
+  text: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  speakingTimer: ReturnType<typeof setTimeout> | null;
+  lastEnd: number | null;
+}
+
 interface RemotePresence {
   nonce: string;
   phase: Exclude<VoiceState, "idle">;
@@ -92,6 +99,7 @@ export interface Bindings {
 
 interface SessionHandle {
   pc: RTCPeerConnection;
+  closed: boolean;
   stream: MediaStream;
   audio: HTMLAudioElement;
   dc: RTCDataChannel | null;
@@ -132,7 +140,10 @@ export function formatThreadNotices(entries: ThreadEventNotice[]): { logText: st
     return { logText: content, content };
   }
   const lines = entries.map((entry) => {
-    if (entry.detail === null) return `Thread ${JSON.stringify(entry.title)} ${status(entry)} (no result text; ask me to read it if you want details)`;
+    if (entry.detail === null) {
+      return `Thread ${JSON.stringify(entry.title)} ${status(entry)} ` +
+        "(no result text; ask me to read it if you want details)";
+    }
     return `Thread ${JSON.stringify(entry.title)} ${status(entry)}: ${entry.detail}`;
   });
   const content = lines.join("\n").slice(0, 1500);
@@ -189,9 +200,9 @@ export class VoiceAgent {
   /** Serializes tool executions so outputs are submitted in call order. */
   private toolChain: Promise<void> = Promise.resolve();
   private readonly confirmationGate = new ConfirmationGate();
-  private transcript = {
-    user: { text: "", timer: null as ReturnType<typeof setTimeout> | null, speakingTimer: null as ReturnType<typeof setTimeout> | null, lastEnd: null as number | null },
-    assistant: { text: "", timer: null as ReturnType<typeof setTimeout> | null, speakingTimer: null as ReturnType<typeof setTimeout> | null, lastEnd: null as number | null },
+  private transcript: Record<"user" | "assistant", TranscriptState> = {
+    user: { text: "", timer: null, speakingTimer: null, lastEnd: null },
+    assistant: { text: "", timer: null, speakingTimer: null, lastEnd: null },
   };
   // ---- thread-event notifications (see server: `notifications` setting) ----
   /** Pending thread events, deduped per thread; latest state wins. */
@@ -251,12 +262,7 @@ export class VoiceAgent {
       const dc = this.session?.dc;
       if (!dc || dc.readyState !== "open") return;
       this.log("notice", { text: logText });
-      dc.send(JSON.stringify({
-        type: "session.commentary.append",
-        event_id: crypto.randomUUID(),
-        delegation_id: null,
-        content,
-      }));
+      this.sendCommentary(dc, content);
     },
     log: (kind, payload) => this.log(kind, payload),
   });
@@ -884,6 +890,15 @@ export class VoiceAgent {
     }, delayMs);
   }
 
+  private sendCommentary(dc: RTCDataChannel, content: string) {
+    dc.send(JSON.stringify({
+      type: "session.commentary.append",
+      event_id: crypto.randomUUID(),
+      delegation_id: null,
+      content,
+    }));
+  }
+
   private drainNotices() {
     const dc = this.session?.dc;
     if (!dc || dc.readyState !== "open" || this.pendingNotices.size === 0) return;
@@ -891,7 +906,7 @@ export class VoiceAgent {
     this.pendingNotices.clear();
     const { logText, content } = formatThreadNotices(entries);
     this.log("notice", { text: logText });
-    dc.send(JSON.stringify({ type: "session.commentary.append", event_id: crypto.randomUUID(), delegation_id: null, content }));
+    this.sendCommentary(dc, content);
   }
 
   /** Another window (or this one) started a call: only the newest survives. */
@@ -915,8 +930,16 @@ export class VoiceAgent {
     }
   }
 
+  private recordSeconds(sessionId: string, seconds: number) {
+    void this.bindings?.rpc
+      .call("recordUsage", { sessionId, seconds })
+      .catch(() => undefined);
+  }
+
   private teardown(session: SessionHandle) {
     session.disposeLifecycle?.();
+    // Closing the channel fires its close handler, which stop() points back here.
+    if (session.dc) session.dc.onclose = null;
     session.dc?.close();
     session.pc.close();
     for (const track of session.stream.getTracks()) track.stop();
@@ -928,7 +951,9 @@ export class VoiceAgent {
   stop() {
     const endedNonce = this.nonce;
     const session = this.session;
-    const shouldDefer = Boolean(session?.dc && session.dc.readyState === "open" && this.liveStartedAt !== null);
+    const shouldDefer = Boolean(
+      session && !session.closed && session.dc?.readyState === "open" && this.liveStartedAt !== null,
+    );
     if (session) this.log("session.stopped");
     this.updates.stop("call-ended");
     this.confirmationGate.reset();
@@ -952,7 +977,10 @@ export class VoiceAgent {
     if (shouldDefer) {
       session.dc!.send(JSON.stringify({ type: "session.close" }));
       const timer = setTimeout(() => this.teardown(session), 2000);
-      session.dc!.onclose = () => { clearTimeout(timer); this.teardown(session); };
+      session.dc!.onclose = () => {
+        clearTimeout(timer);
+        this.teardown(session);
+      };
     } else this.teardown(session);
   }
 
@@ -1150,7 +1178,15 @@ export class VoiceAgent {
       // navigation/backgrounding when the element is actually in the DOM — a
       // detached `new Audio()` can go silent. Hidden so it never shows.
       this.prepareAudioElement(audio);
-      const session: SessionHandle = { pc, stream, audio, dc: null, micTrack: null, micSender: null };
+      const session: SessionHandle = {
+        pc,
+        stream,
+        audio,
+        dc: null,
+        micTrack: null,
+        micSender: null,
+        closed: false,
+      };
       this.session = session;
       // Never stay "connecting" forever: if the data channel hasn't opened in
       // time, tear the attempt down and let the user retry cleanly.
@@ -1206,6 +1242,7 @@ export class VoiceAgent {
 
       const dc = pc.createDataChannel("oai-events");
       session.dc = dc;
+      let liveSessionId: string | null = null;
       dc.onopen = () => this.logDiag("conn.dc.open");
       dc.onclose = () => this.logDiag("conn.dc.close");
       dc.onmessage = (message) => {
@@ -1217,14 +1254,16 @@ export class VoiceAgent {
           this.liveStartedAt = Date.now();
           this.setState("live");
           this.startPresenceHeartbeat();
-          this.log("session.live", { liveSessionId: sessionId });
+          this.log("session.live", { liveSessionId });
         } else if (type === "session.input_transcript.delta" || type === "session.output_transcript.delta") {
           const speaker = type.includes("input") ? "user" : "assistant";
           const delta = String(event.delta ?? "");
           const start = Number(event.start_ms ?? 0);
           const end = Number(event.end_ms ?? start);
           const state = this.transcript[speaker];
-          if (speaker === "user" && (state.lastEnd === null || start - state.lastEnd > 1500)) this.confirmationGate.noteUserTurn();
+          if (speaker === "user" && (state.lastEnd === null || start - state.lastEnd > 1500)) {
+            this.confirmationGate.noteUserTurn();
+          }
           state.lastEnd = end;
           state.text += delta;
           this.setUserSpeaking(speaker === "user" || this.userSpeaking);
@@ -1243,22 +1282,49 @@ export class VoiceAgent {
           const inner = event.event as Record<string, unknown> | undefined;
           if (inner?.type === "response.output_item.done") {
             const item = inner.item as Record<string, unknown> | undefined;
-            if (item?.type === "function_call") this.toolChain = this.toolChain.then(() => this.handleToolCall(dc, { name: item.name, call_id: item.call_id, arguments: item.arguments })).catch(() => undefined);
+            if (item?.type === "function_call") {
+              this.toolChain = this.toolChain
+                .then(() => this.handleToolCall(dc, {
+                  name: item.name,
+                  call_id: item.call_id,
+                  arguments: item.arguments,
+                }))
+                .catch(() => undefined);
+            }
           } else if (inner?.type === "response.completed") {
             const usage = (inner.response as { usage?: Record<string, unknown> } | undefined)?.usage;
-            if (usage && this.nonce) void this.bindings?.rpc.call("recordBackendUsage", { sessionId: this.nonce, input: Number(usage.input_tokens ?? 0), cached: Number((usage.input_tokens_details as { cached_tokens?: number } | undefined)?.cached_tokens ?? 0), output: Number(usage.output_tokens ?? 0) }).catch(() => undefined);
+            if (usage && this.nonce) {
+              void this.bindings?.rpc
+                .call("recordBackendUsage", {
+                  sessionId: this.nonce,
+                  input: Number(usage.input_tokens ?? 0),
+                  cached: Number(
+                    (usage.input_tokens_details as { cached_tokens?: number } | undefined)
+                      ?.cached_tokens ?? 0,
+                  ),
+                  output: Number(usage.output_tokens ?? 0),
+                })
+                .catch(() => undefined);
+            }
           } else if (inner?.type === "response.failed") {
-            const message = String((inner.error as { message?: string } | undefined)?.message ?? "response failed");
+            const message = String(
+              (inner.error as { message?: string } | undefined)?.message ?? "response failed",
+            );
             this.log("error", { message });
             toast.error(`Aide: ${message}`);
           }
         } else if (type === "session.usage.updated") {
           const usage = event.usage as { seconds?: number } | undefined;
-          if (usage) void this.bindings?.rpc.call("recordUsage", { sessionId: nonce, seconds: Number(usage.seconds ?? 0) }).catch(() => undefined);
+          if (usage) this.recordSeconds(nonce, Number(usage.seconds ?? 0));
         } else if (type === "session.closed") {
           const usage = event.usage as { seconds?: number } | undefined;
-          if (usage) void this.bindings?.rpc.call("recordUsage", { sessionId: nonce, seconds: Number(usage.seconds ?? 0) }).catch(() => undefined);
-          if (this.session === session) this.teardown(session);
+          if (usage) this.recordSeconds(nonce, Number(usage.seconds ?? 0));
+          if (this.session === session) {
+            session.closed = true;
+            const reason = String(event.reason ?? "unknown");
+            if (reason !== "close_requested") toast.info(`Aide: call ended (${reason})`);
+            this.stop();
+          }
         } else if (type === "error") {
           const detail = (event.error as { message?: string } | undefined)?.message;
           this.log("error", { message: detail ?? "live error" });
@@ -1278,6 +1344,7 @@ export class VoiceAgent {
         ...bindings.context,
       });
       if (this.session?.pc !== pc) return; // stopped while exchanging
+      liveSessionId = sessionId;
       await pc.setRemoteDescription({ type: "answer", sdp });
       this.logDiag("session.created", { liveSessionId: sessionId });
     } catch (error) {
