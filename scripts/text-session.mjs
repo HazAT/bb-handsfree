@@ -1,57 +1,29 @@
 #!/usr/bin/env node
-// Headless text-only test harness for the Handsfree voice agent.
+// Headless GPT-Live text harness using the running Handsfree plugin.
 //
-// Opens a WebSocket session to the OpenAI Realtime API (no audio, text out),
-// loads the live prompt + tool schemas from the running handsfree plugin, and
-// wires tool calls back into the plugin's runTool RPC — so you can test the
-// full agent loop from a terminal:
+//   OPENAI_API_KEY=... node scripts/text-session.mjs "what's running right now?"
+//   OPENAI_API_KEY=... node scripts/text-session.mjs --no-tools "say hello"
+//   OPENAI_API_KEY=... node scripts/text-session.mjs --debug --bb-url http://127.0.0.1:38886 "list threads"
 //
-//   node scripts/text-session.mjs "what's running right now?"
-//   node scripts/text-session.mjs --model gpt-realtime-2.1-mini "list my projects"
-//   node scripts/text-session.mjs --no-tools "say hello"      # raw model, no bb
-//   node scripts/text-session.mjs --bb-url http://127.0.0.1:38886 "..."
-//
-// Auth: OPENAI_API_KEY, else the Codex CLI token in ~/.codex/auth.json.
-
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+// The key is read from OPENAI_API_KEY and is never printed.
 
 const args = process.argv.slice(2);
-const flags = { model: "gpt-realtime-2.1", bbUrl: "http://127.0.0.1:38886", tools: true, debug: false };
+const flags = { bbUrl: "http://127.0.0.1:38886", tools: true, debug: false };
 const words = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--model") flags.model = args[++i];
-  else if (args[i] === "--bb-url") flags.bbUrl = args[++i];
+  if (args[i] === "--bb-url") flags.bbUrl = args[++i];
   else if (args[i] === "--no-tools") flags.tools = false;
   else if (args[i] === "--debug") flags.debug = true;
   else words.push(args[i]);
 }
 const message = words.join(" ").trim();
 if (!message) {
-  console.error('Usage: node scripts/text-session.mjs [--model m] [--no-tools] [--debug] "your message"');
+  console.error('Usage: node scripts/text-session.mjs [--bb-url URL] [--debug] [--no-tools] "your message"');
   process.exit(1);
 }
-
-function jwtExp(token) {
-  try {
-    return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")).exp ?? 0;
-  } catch {
-    return 0;
-  }
-}
-
-function apiKey() {
-  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
-  try {
-    const auth = JSON.parse(readFileSync(join(homedir(), ".codex", "auth.json"), "utf8"));
-    const access = auth.tokens?.access_token;
-    if (access && jwtExp(access) - 60 > Date.now() / 1000) return access;
-    if (access) console.error("Codex token expired — start a voice session once (it refreshes it) or set OPENAI_API_KEY.");
-  } catch {
-    /* no codex auth */
-  }
-  console.error("No credentials. Set OPENAI_API_KEY or `codex login`.");
+const key = process.env.OPENAI_API_KEY;
+if (!key) {
+  console.error("[error] OPENAI_API_KEY is required");
   process.exit(1);
 }
 
@@ -63,128 +35,154 @@ async function rpc(method, input) {
   });
   if (!response.ok) throw new Error(`${method}: HTTP ${response.status}`);
   const body = await response.json();
-  if (!body.ok) throw new Error(`${method}: ${body.error ?? "rpc failed"}`);
+  if (!body.ok) throw new Error(`${method}: ${body.error ?? "RPC failed"}`);
   return body.result;
 }
 
-// Pull the live prompt + tools from the running plugin; degrade gracefully.
-let instructions = "You are a concise assistant. Reply in text.";
-let tools = [];
-if (flags.tools) {
-  try {
-    const [prompt, toolList] = await Promise.all([rpc("getPrompt", null), rpc("getTools", null)]);
-    instructions = `${prompt.content}\n\nCurrent context: threadId=none, projectId=none. This is a TEXT test session; reply in text.`;
-    tools = toolList.tools
-      .filter((tool) => !tool.local) // composer tools live in the app frontend
-      .map((tool) => ({
-        type: "function",
-        name: tool.name,
-        description: tool.description,
-        ...(tool.parameters ? { parameters: JSON.parse(tool.parameters) } : {}),
-      }));
-    console.error(`[loaded live prompt + ${tools.length} tools from ${flags.bbUrl}]`);
-  } catch (error) {
-    console.error(`[plugin unreachable (${error.message}); running without bb tools]`);
-  }
-}
-
-const key = apiKey();
-const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(flags.model)}`;
-let ws;
+let session;
+let localTools = new Set();
 try {
-  ws = new WebSocket(url, { headers: { Authorization: `Bearer ${key}` } });
-} catch {
-  ws = new WebSocket(url, ["realtime", `openai-insecure-api-key.${key}`, "openai-beta.realtime-v1"]);
+  const config = await rpc("getSessionConfig", { threadId: null, projectId: null, onNewThreadScreen: false });
+  session = config.session;
+  const toolList = await rpc("getTools", null);
+  localTools = new Set(toolList.tools.filter((tool) => tool.local).map((tool) => tool.name));
+} catch (error) {
+  console.error(`[error] plugin RPC failed: ${error.message}`);
+  process.exit(1);
 }
 
+session.audio = { format: { type: "audio/pcm", rate: 24000 }, output: session.audio.output };
+if (flags.tools) {
+  console.error(`[config] backend ${session.delegation.responses.model}, ${session.delegation.responses.tools.length} tools, voice ${session.audio.output.voice}`);
+} else {
+  session.instructions = "You are a concise assistant in a text-only GPT-Live smoke test. Reply briefly to the user.";
+  session.delegation.responses.tools = [];
+}
+
+const ws = new WebSocket("wss://api.openai.com/v1/live/sessions", { headers: { Authorization: `Bearer ${key}` } });
 const send = (event) => ws.send(JSON.stringify(event));
-const pendingCalls = [];
-let done = false;
+const startedAt = Date.now();
+const elapsed = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+let finished = false;
+let closeSent = false;
+let silence;
+let closeTimer;
+let outTranscript = "";
+let finalBackendText = false;
+let voiceSeconds;
+let backendInput;
+let backendOutput;
+let timeout;
 
-ws.addEventListener("open", () => {
-  send({
-    type: "session.update",
-    session: {
-      type: "realtime",
-      output_modalities: ["text"],
-      instructions,
-      tools,
-    },
-  });
-  send({
-    type: "conversation.item.create",
-    item: { type: "message", role: "user", content: [{ type: "input_text", text: message }] },
-  });
-  send({ type: "response.create" });
-  console.error(`[user] ${message}`);
-});
+function fail(message) {
+  if (finished) return;
+  finished = true;
+  clearInterval(silence);
+  clearTimeout(closeTimer);
+  clearTimeout(timeout);
+  console.error(`[error] ${message}`);
+  ws.close();
+  process.exitCode = 1;
+}
 
-ws.addEventListener("message", (event) => {
-  const data = JSON.parse(event.data);
-  if (flags.debug) console.error(`  · ${data.type}`);
-  switch (data.type) {
-    case "error":
-      console.error(`[error] ${JSON.stringify(data.error ?? data)}`);
-      process.exit(1);
-      break;
-    case "response.output_text.delta":
-    case "response.text.delta":
-      process.stdout.write(data.delta);
-      break;
-    case "response.output_text.done":
-    case "response.text.done":
-      process.stdout.write("\n");
-      break;
-    case "response.output_item.done":
-      if (data.item?.type === "function_call") {
-        pendingCalls.push(data.item);
-        console.error(`[tool call] ${data.item.name}(${data.item.arguments})`);
-      }
-      break;
-    case "response.done": {
-      const usage = data.response?.usage;
-      if (pendingCalls.length > 0) {
-        void runPendingCalls();
-      } else {
-        if (usage) console.error(`[usage] in ${usage.input_tokens} / out ${usage.output_tokens}`);
-        done = true;
-        ws.close();
-      }
-      break;
-    }
-    default:
-      break;
+function closeSession() {
+  if (!closeSent && ws.readyState === WebSocket.OPEN) {
+    closeSent = true;
+    clearInterval(silence);
+    send({ type: "session.close" });
+  }
+}
+
+ws.addEventListener("open", () => send({ type: "session.start", event_id: "start", session }));
+ws.addEventListener("error", () => fail("WebSocket error"));
+ws.addEventListener("close", (event) => {
+  clearInterval(silence);
+  clearTimeout(closeTimer);
+  clearTimeout(timeout);
+  if (!finished) {
+    console.error(`[error] WebSocket closed code=${event.code} ${event.reason || ""}`);
+    process.exitCode = 1;
   }
 });
 
-async function runPendingCalls() {
-  const calls = pendingCalls.splice(0);
-  for (const call of calls) {
+ws.addEventListener("message", async (event) => {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch {
+    fail("invalid WebSocket event");
+    return;
+  }
+  if (flags.debug) console.error(`[${elapsed()}] ${data.type}`);
+  if (data.type === "error") {
+    fail(data.error?.message ?? JSON.stringify(data.error ?? data));
+    return;
+  }
+  if (data.type === "session.started") {
+    const chunk = Buffer.alloc(4800).toString("base64");
+    silence = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) send({ type: "session.input_audio.append", audio: chunk });
+    }, 100);
+    send({ type: "response.item.create", event_id: "message", item: { type: "message", role: "user", content: [{ type: "input_text", text: message }] } });
+    send({ type: "response.create", event_id: "response" });
+    console.error(`[user] ${message}`);
+    return;
+  }
+  if (data.type === "session.output_transcript.delta") {
+    outTranscript += data.delta;
+    return;
+  }
+  if (data.type === "session.usage.updated") {
+    voiceSeconds = data.usage?.seconds;
+    return;
+  }
+  if (data.type === "session.closed") {
+    finished = true;
+    clearInterval(silence);
+    voiceSeconds = data.usage?.seconds ?? voiceSeconds;
+    console.error(`[${elapsed()}] session.closed usage=${JSON.stringify(data.usage ?? {})}`);
+    ws.close();
+    return;
+  }
+  if (data.type !== "response.event") return;
+
+  const inner = data.event;
+  if (inner.type === "response.output_item.done" && inner.item?.type === "function_call") {
+    const { name, call_id: callId, arguments: argumentText } = inner.item;
+    console.error(`[tool call] ${name}(${argumentText || "{}"})`);
     let output;
     try {
-      const parsed = JSON.parse(call.arguments || "{}");
-      const result = await rpc("runTool", { name: call.name, args: parsed, threadId: null, projectId: null });
-      output = result.output;
+      if (localTools.has(name)) output = "(frontend-only tool; not available in the text harness)";
+      else output = (await rpc("runTool", { name, args: JSON.parse(argumentText || "{}"), threadId: null, projectId: null })).output;
     } catch (error) {
-      output = `Error: ${error.message}`;
+      output = `Tool error: ${error.message}`;
     }
     console.error(`[tool result] ${output.length > 300 ? `${output.slice(0, 300)}…` : output}`);
-    send({
-      type: "conversation.item.create",
-      item: { type: "function_call_output", call_id: call.call_id, output },
-    });
+    send({ type: "response.item.create", event_id: `output_${callId}`, item: { type: "function_call_output", call_id: callId, output } });
+    send({ type: "response.create", event_id: `continue_${callId}` });
+    return;
   }
-  send({ type: "response.create" });
-}
+  if (inner.type === "response.output_item.done" && inner.item?.type === "message") {
+    const text = inner.item.content?.map((content) => content.text ?? "").join("") ?? "";
+    console.error(`[backend] ${text}`);
+    finalBackendText = true;
+    closeTimer = setTimeout(closeSession, 8_000);
+    return;
+  }
+  if (inner.type === "response.completed") {
+    const usage = inner.response?.usage;
+    if (usage) {
+      backendInput = usage.input_tokens;
+      backendOutput = usage.output_tokens;
+    }
+  }
+});
 
-ws.addEventListener("close", (event) => {
-  if (!done) console.error(`[closed] code ${event.code} ${event.reason || ""}`);
-  process.exit(done ? 0 : 1);
+timeout = setTimeout(() => fail("timeout after 60s"), 60_000);
+process.on("exit", () => {
+  if (outTranscript) console.error(`[aide] ${outTranscript}`);
+  if (voiceSeconds !== undefined || backendInput !== undefined) {
+    console.error(`[usage] seconds=${voiceSeconds ?? "?"} backend in/out=${backendInput ?? "?"}/${backendOutput ?? "?"}`);
+  }
+  if (!finalBackendText && !finished) process.exitCode = 1;
 });
-ws.addEventListener("error", () => {
-  console.error("[websocket error] check credentials/model name");
-});
-setTimeout(() => {
-  console.error("[timeout] no completion after 60s");
-  process.exit(1);
-}, 60_000);

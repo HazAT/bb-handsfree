@@ -2,12 +2,30 @@
 
 Aide is a voice operator for bb: you talk, it drives bb (focuses threads, starts
 work, reads output, edits the composer). The call is WebRTC to the OpenAI
-Realtime API — microphone capture and audio playback happen in the bb app (a
-webview); the plugin backend holds the API key, does the SDP exchange, and runs
-tools via the bb SDK.
+GPT-Live API — microphone capture and audio playback happen in the bb app (a
+webview); the plugin backend creates the Live session with Responses delegation,
+holds the API key, does the SDP exchange, and runs tools via the bb SDK.
 
 This is the shared vocabulary and how it actually works. For behaviors, see
 [scenarios](./handsfree-voice-scenarios.md).
+
+## GPT-Live session
+
+The session has two prompts: a short live prompt that defines Aide's voice and
+when to delegate, and a detailed backend prompt that defines the operator,
+plugin tools, delegation, progress updates, and confirmation rules. The backend
+model selects tools; nested `response.event` messages carry function calls to
+`app.tsx`/`voice-agent.ts`, which executes them through RPC and replies with
+`response.item.create` followed by `response.create`.
+
+Audio and transcript events are full-duplex. Transcript deltas are fragments,
+not turns; the client detects a user turn after a 1.5 second gap on the session
+timeline. Thread notices and progress updates use `session.commentary.append`.
+`session.usage.updated` reports a cumulative voice-seconds snapshot, while
+`session.close` followed by `session.closed` supplies final usage. Cost is voice
+seconds × $0.05/minute plus the backend model's input, cached-input, and output
+tokens. Speak is the exception: it still uses gpt-realtime-2.1-mini.
+
 
 ## Terminology
 
@@ -46,10 +64,10 @@ gets its own instance.
 
 ## Cross-surface state
 
-The only channel across realms is bb's realtime bus. The plugin **backend** can
-`bb.realtime.publish(channel, payload)` to every connected client; a surface can
-only **subscribe** (`useRealtime`). There is no client-to-client publish, so a
-surface "broadcasts" by calling an RPC that publishes.
+The only channel across realms is bb's event bus. The plugin **backend** can
+publish to every connected client; a surface can only **subscribe**. There is no
+client-to-client publish, so a surface "broadcasts" by calling an RPC that
+publishes.
 
 - The owner publishes **presence** on each coarse transition and on a ~10s
   heartbeat.
@@ -63,9 +81,9 @@ surface "broadcasts" by calling an RPC that publishes.
 Coarse only: who's-speaking isn't broadcast (too chatty); it shows on the owner
 surface.
 
-## Client, device, and realtime scope
+## Client, device, and event scope
 
-`bb.realtime.publish` reaches "every connected client" of one plugin backend —
+The event bus reaches "every connected client" of one plugin backend —
 one bb app instance and everything attached to it (the local view plus remote
 bb-connect views). It is **not** cross-machine: a separate, independent bb app has
 its own backend, bus, and database. In our setup the phone is a bb-connect client

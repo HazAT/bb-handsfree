@@ -87,7 +87,7 @@ and for your coding agents:
 bb handsfree live            # who's running right now
 bb handsfree live --json     # machine-readable
 bb handsfree read thr_xxxxx  # a thread's status + latest assistant output
-bb handsfree usage           # what your voice sessions cost, per day (estimated)
+bb handsfree usage           # voice minutes + backend tokens, per day (estimated)
 bb handsfree tools           # tool calls, errors, median latency, and p90 latency
 bb handsfree stop            # stop an active voice session in any bb window
 ```
@@ -99,9 +99,9 @@ skill.
 
 Open the Handsfree plugin settings for curated sections:
 
-- **Models & voice** — the OpenAI Realtime model, the assistant voice (marin
-  and cedar are the highest-quality options), and a badge showing which
-  credential Aide will use.
+- **Models & voice** — GPT-Live uses one fixed voice model, a selectable
+  backend model, 22 assistant voices (marin and cedar are the highest-quality
+  options), and a badge showing the configured credential.
 - **Behavior** — whether Aide announces thread events, whether it may
   delegate work to a bb agent of its own, and which installed plugins' `bb`
   commands it may run (all / none / a specific list).
@@ -117,9 +117,9 @@ Open the Handsfree plugin settings for curated sections:
   shared across your devices.
 
 The only credential is the **OpenAI API key**, a secret stored in bb's plugin
-secret store (0600 file, never in the db or frontend). It's optional: leave it
-blank to use your ChatGPT subscription (`codex login`), or set `OPENAI_API_KEY`
-in the bb server's environment. Set it in the settings field, or via the CLI:
+secret store (0600 file, never in the db or frontend). Set it in the settings
+field or provide `OPENAI_API_KEY` in the bb server's environment. Set it via
+the CLI:
 
 ```
 bb plugin config handsfree set openaiApiKey <your-openai-key>
@@ -134,7 +134,7 @@ longer via `bb plugin config`).
   window. Also check `bb plugin list` shows `handsfree … running`.
 - **"needs-configuration"** — set the API key (Quick start step 1).
 - **Connects then drops** — check `bb plugin logs handsfree -f` while clicking;
-  the SDP exchange error (bad key, model name) is logged there.
+  look for the `OpenAI live session failed …` log line.
 - **No audio out** — the first click must come from you (browser autoplay
   rules); if you started it and hear nothing, check system output device.
 
@@ -145,6 +145,13 @@ never leaves the bb server, and no audio is stored by the plugin.
 
 ## For developers
 
+### How it works with GPT-Live
+
+gpt-live-1 handles the full-duplex conversation and costs $0.05/minute billed
+per second. A selectable backend model (default GPT-5.6 Terra) runs Aide's tools;
+thread completions and progress updates are spoken from appended commentary.
+Speak remains on gpt-realtime-2.1-mini for verbatim read-aloud.
+
 Architecture: bb's plugin frontend runs in a real browser context, so mic
 capture and playback live in `app.tsx` (getUserMedia + RTCPeerConnection +
 data channel) with no native helper — unlike its VS Code sibling
@@ -152,7 +159,7 @@ data channel) with no native helper — unlike its VS Code sibling
 
 ```text
 app.tsx            composer button + sidebar voice bar
-voice-agent.ts     WebRTC session, data channel, tool dispatch
+voice-agent.ts     WebRTC session, Live data channel, delegated tool dispatch
 voice-chrome.tsx   waveform button + session UI; sessions-panel.tsx sessions view
 server.ts          API key + SDP exchange, bb tools via bb.sdk, `bb handsfree` CLI
 ```
@@ -160,11 +167,11 @@ server.ts          API key + SDP exchange, bb tools via bb.sdk, `bb handsfree` C
 More detail: [docs/handsfree-voice-architecture.md](docs/handsfree-voice-architecture.md)
 and [docs/handsfree-voice-scenarios.md](docs/handsfree-voice-scenarios.md).
 
-Tool-call flow: model → data channel → `app.tsx` → plugin RPC `runTool` →
-`bb.sdk` → output back over the data channel (function_call_output +
-response.create). Relay tools are first staged in the frontend; after the
-readback and the user's yes, the model calls frontend-local `confirm_pending`,
-which sends the staged call through the same RPC path exactly once.
+Tool-call flow: backend model → nested `response.event` function call →
+`app.tsx`/`voice-agent.ts` → RPC `runTool` → `response.item.create` +
+`response.create`. Relay tools stage in the frontend; `confirm_pending` releases
+the staged call after the user's next spoken turn. Test the production session
+with `node scripts/text-session.mjs "…"`.
 
 Voice tools: `get_context`, `list_projects`, `list_machines`,
 `list_live_threads`, `list_threads`, `search_threads`, `read_thread`,
@@ -179,6 +186,6 @@ relay after the user confirms it).
 Dev loop:
 
 ```sh
-bb plugin dev          # rebuild + reload on save
 bb plugin logs handsfree -f # tool traffic and errors
+node scripts/text-session.mjs "what's running right now?" # Live smoke test
 ```

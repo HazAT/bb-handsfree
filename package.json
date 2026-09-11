@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-handsfree",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "test": "node --test audio-devices.test.ts voice-agent.test.ts confirm-gate.test.ts progress-updates.test.ts shortcuts.test.ts speak-text.test.ts server.test.ts",
@@ -12,7 +12,7 @@
   },
   "bb": {
     "name": "Handsfree",
-    "description": "Hands-free voice operator for bb: talk to an agent that focuses threads, sends messages, starts work, and shows diffs.",
+    "description": "Hands-free voice operator for bb on GPT-Live: talk to an agent that focuses threads, sends messages, starts work, and reads results back.",
     "branding": {
       "icon": "./assets/icon.svg"
     },

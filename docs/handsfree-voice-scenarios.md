@@ -96,9 +96,10 @@ updates” to end them sooner.
 - **Ideal:** concise, grounded updates arrive without interrupting you or polling
   from the voice model.
 - **Under the hood:** the frontend runs one timeout at a time, asks the internal
-  `thread_activity` tool for events since its last cursor, and holds a prepared
-  update while you or Aide is speaking. Thread completion events and call teardown
-  cancel the in-memory schedule automatically.
+  `thread_activity` tool for events since its last cursor, and sends each update
+  as a `session.commentary.append`. Commentary is delivered without quiet-point
+  gating; thread completion events and call teardown cancel the in-memory schedule
+  automatically.
 
 ## 10. Confirm before relaying
 
@@ -109,10 +110,12 @@ only your yes causes the request to run.
 - **Ideal:** no spoken request reaches a coding agent until you have heard and
   approved exactly what will be relayed.
 - **Under the hood:** `send_to_thread`, prompted `start_thread`, and `delegate`
-  only stage their name and arguments in a frontend confirmation gate. The gate
-  releases that exact call through `confirm_pending` only when exactly one user
-  turn has happened since staging. Zero turns are refused; two or more expire
-  and clear it; a corrected proposal replaces it. Ending the call clears it.
+  stage their name and arguments in the backend confirmation gate. gpt-live-1
+  reads the staged request back and asks for approval. The gate counts user
+  turns from transcript timing; `confirm_pending` releases that exact call in a
+  later delegation only when exactly one new turn has happened since staging.
+  Zero turns are refused; two or more expire and clear it; a corrected proposal
+  replaces it. Ending the call clears it.
 
 ## How a mis-classified navigating tool self-reports
 
