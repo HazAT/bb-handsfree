@@ -28,6 +28,13 @@ import { matchShortcut, shortcutLabel } from "./shortcuts";
 import { MAC, SHORTCUT_STORAGE_KEY, shortcutStore, useShortcutSync, useShortcuts } from "./shortcut-store";
 import "./app.css";
 
+function useReportView() {
+  const { threadId, projectId } = useBbContext();
+  useEffect(() => {
+    voiceAgent.observeView({ threadId: threadId ?? null, projectId: projectId ?? null });
+  }, [threadId, projectId]);
+}
+
 function AideVoiceButton() {
   const rpc = useRpc<typeof rpcContract>();
   const composer = useComposer();
@@ -212,6 +219,7 @@ function AideVoiceButton() {
  * than the state-blind footer-action slot.
  */
 function SidebarVoiceBar() {
+  useReportView();
   const state = useSyncExternalStore(voiceAgent.subscribe, voiceAgent.getState);
   const activity = useSyncExternalStore(voiceAgent.subscribe, voiceAgent.getActivity);
   const live = state === "live";
@@ -301,6 +309,7 @@ function ThreadListWithVoiceBar({ Original }: PluginThreadListProps) {
 
 /** Trailing accessory on the Aide sidebar row: a live indicator with duration. */
 function SidebarLiveIndicator() {
+  useReportView();
   const state = useSyncExternalStore(voiceAgent.subscribe, voiceAgent.getState);
   const elapsed = useCallElapsed();
   if (state === "idle") return null;

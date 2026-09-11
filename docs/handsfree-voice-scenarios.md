@@ -103,18 +103,21 @@ updates” to end them sooner.
 
 ## 10. Confirm before relaying
 
-Ask Aide to message a thread, start a thread with a prompt, or delegate work.
-Aide reads the request back in a short sentence and asks “Send?” or “Start?”;
-only your yes causes the request to run.
+An explicit request to send, tell, pass or hand something to “the thread” goes
+at once to the thread in view when the tool runs. Aide asks “Send?” only when it
+inferred the relay or found another thread by title or search. Starting a thread
+with a prompt and delegating work still require confirmation.
 
-- **Ideal:** no spoken request reaches a coding agent until you have heard and
-  approved exactly what will be relayed.
-- **Under the hood:** `send_to_thread`, prompted `start_thread`, and `delegate`
-  stage their name and arguments in the backend confirmation gate. gpt-live-1
-  reads the staged request back and asks for approval. The gate counts user
-  turns from transcript timing; `confirm_pending` releases that exact call in a
-  later delegation only when exactly one new turn has happened since staging.
-  Zero turns are refused; two or more expire and clear it; a corrected proposal
+- **Ideal:** explicit relays reach the thread on screen immediately; inferred
+  requests are read back and approved exactly before they run.
+- **Under the hood:** `send_to_thread` omits `thread_id` for the thread in view,
+  resolved from the fresh view context when the tool runs. Prompted
+  `start_thread`, `delegate`, and inferred or named-thread relays stage their
+  name and arguments in the backend confirmation gate. gpt-live-1 reads the
+  staged request back and asks for approval. The gate counts user turns from
+  transcript timing; `confirm_pending` releases that exact call in a later
+  delegation only when exactly one new turn has happened since staging. Zero
+  turns are refused; two or more expire and clear it; a corrected proposal
   replaces it. Ending the call clears it.
 
 ## How a mis-classified navigating tool self-reports

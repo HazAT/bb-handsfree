@@ -54,8 +54,9 @@ press the new combination.
 - *"What did the agent say?"* — summarizes the latest output aloud
 - *"Give me progress updates every minute"* — regularly reports what the
   thread's agent has done until it finishes
-- *"Tell it to also add tests for the error path"* — stages a message for the
-  thread's agent; Aide reads it back and asks **“Send?”** before anything is sent
+- *"Tell it to also add tests for the error path"* — sends it at once to the
+  thread on screen; Aide reads it back and asks only when it inferred the relay
+  or another thread was found
 - *"Start a new thread in the replay project: fix the CI timeout"* — Aide reads
   the prompt back and asks **“Start?”** before creating the thread
 - *"Show me the diff for that thread"*
@@ -169,8 +170,9 @@ and [docs/handsfree-voice-scenarios.md](docs/handsfree-voice-scenarios.md).
 
 Tool-call flow: backend model → nested `response.event` function call →
 `app.tsx`/`voice-agent.ts` → RPC `runTool` → `response.item.create` +
-`response.create`. Relay tools stage in the frontend; `confirm_pending` releases
-the staged call after the user's next spoken turn. Test the production session
+`response.create`. Explicit relays to the thread on screen send immediately;
+inferred relays, named-thread relays, new threads and delegation stage in the
+frontend until `confirm_pending` releases them. Test the production session
 with `node scripts/text-session.mjs "…"`.
 
 Voice tools: `get_context`, `list_projects`, `list_machines`,

@@ -560,15 +560,15 @@ function toolSchemas(pluginCommands: PluginCommandInfo[] = [], options: { delega
     { type: "function", name: "list_live_threads", description: "List the threads in the Live threads sidebar section: running right now (active/starting/provisioning/waiting), plus threads that finished within the last 30 minutes (status 'recently-finished'). Only threads without a 'recently-finished' status are still working." },
     { type: "function", name: "list_threads", description: "List recent bb threads (id, title, status). Optionally filter by project id.", parameters: { type: "object", properties: { project_id: { type: "string" }, limit: { type: "number", description: "Max threads to return (default 15)." } } } },
     { type: "function", name: "search_threads", description: "Full-text search bb threads by title/content. Returns matching thread ids and titles.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-    { type: "function", name: "read_thread", description: "Read a thread's details and its latest assistant output.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
+    { type: "function", name: "read_thread", description: "Read a thread's details and its latest assistant output.", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." } } } },
     { type: "function", name: "focus_thread", description: "Open/focus a thread in the user's bb app window.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
-    { type: "function", name: "set_pane", description: "Change a thread pane's presentation in the bb app: spotlight, clear-spotlight, maximize, restore, or toggle.", parameters: { type: "object", properties: { thread_id: { type: "string" }, action: { type: "string", enum: ["spotlight", "clear-spotlight", "maximize", "restore", "toggle"] } }, required: ["thread_id", "action"] } },
-    { type: "function", name: "send_to_thread", description: "Stage a message to a thread's agent. Nothing is sent until the user confirms and confirm_pending is called; then it starts a turn if idle or queues/steers if running.", parameters: { type: "object", properties: { thread_id: { type: "string" }, message: { type: "string" } }, required: ["thread_id", "message"] } },
+    { type: "function", name: "set_pane", description: "Change a thread pane's presentation in the bb app: spotlight, clear-spotlight, maximize, restore, or toggle.", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." }, action: { type: "string", enum: ["spotlight", "clear-spotlight", "maximize", "restore", "toggle"] } }, required: ["action"] } },
+    { type: "function", name: "send_to_thread", description: "Stage a message to a thread's agent. Nothing is sent until the user confirms and confirm_pending is called; then it starts a turn if idle or queues/steers if running.", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." }, message: { type: "string" }, explicit: { type: "boolean", description: "True when the user explicitly asked to send, tell, relay, pass or hand this to the thread they are looking at ('tell it …', 'send this to the thread', 'pass this along'). It is then sent at once with no readback. Leave it out when you inferred the relay or the target thread was found by title or search." } }, required: ["message"] } },
     { type: "function", name: "start_thread", description: "Stage a new agent thread when prompt contains dictated work. Nothing starts until the user confirms and confirm_pending is called. With no prompt, this instead opens bb's New thread screen for the user to type their own. Runs on the project's default machine unless machine_id is given — if the project lives on several connected machines and the user didn't say which, check list_machines and ask one short question instead of guessing.", parameters: { type: "object", properties: { project_id: { type: "string", description: "Project id; defaults to the user's current project." }, prompt: { type: "string", description: "The user's own instruction for the agent, verbatim. Omit if they didn't give one." }, title: { type: "string" }, machine_id: { type: "string", description: "Machine (host) id to run on, from list_machines. Omit to use the project's default machine." } } } },
-    { type: "function", name: "stop_thread", description: "Stop a running thread.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
-    { type: "function", name: "archive_thread", description: "Archive a thread (and its children).", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
-    { type: "function", name: "rename_thread", description: "Rename a thread.", parameters: { type: "object", properties: { thread_id: { type: "string" }, title: { type: "string" } }, required: ["thread_id", "title"] } },
-    { type: "function", name: "show_diff", description: "Summarize a thread's workspace diff (changed files, additions/deletions) and focus the thread so the user can see it.", parameters: { type: "object", properties: { thread_id: { type: "string" } }, required: ["thread_id"] } },
+    { type: "function", name: "stop_thread", description: "Stop a running thread.", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." } } } },
+    { type: "function", name: "archive_thread", description: "Archive a thread (and its children).", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." } } } },
+    { type: "function", name: "rename_thread", description: "Rename a thread.", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." }, title: { type: "string" } }, required: ["title"] } },
+    { type: "function", name: "show_diff", description: "Summarize a thread's workspace diff (changed files, additions/deletions) and focus the thread so the user can see it.", parameters: { type: "object", properties: { thread_id: { type: "string", description: "Omit to target the thread the user is looking at; bb resolves it when the tool runs. Pass an id only for another thread the user named." } } } },
     { type: "function", name: "update_instructions", description: "Amend your own standing instructions (the system prompt for future voice sessions). Pass the COMPLETE new instructions text, not a diff. Use only when the user asks for a lasting behavior change.", parameters: { type: "object", properties: { instructions: { type: "string", description: "The full replacement instructions." }, reason: { type: "string", description: "One short sentence: why, quoting the user's request." } }, required: ["instructions", "reason"] } },
     ...delegateTool,
     // Handled locally in the bb app frontend, never reaches runTool:
@@ -602,12 +602,12 @@ Backend tools:
 
 Delegate to the backend when:
 - The user says anything about threads, projects, agents, code or their work, including answers or corrections meant for an agent, what it said, what's running, or keeping posted.
-- The user answers yes or no to a request you read back; the backend must record the answer.
+- The user answers a request you read back — delegate at once, even a one-word yes or no.
 
 Do not delegate to the backend when:
 - The user greets you, asks you to repeat something already said, or needs a brief clarification.
 
-Delegate before giving an answer that depends on backend work. Do not guess the result while waiting. Relays are two steps: when the backend reports a staged request, read it back in one short sentence and ask "Send?" (or "Start?"), then wait. Only say "Sent." or "Started." after backend confirmation. Thread updates are short notes: name the thread, lead with failures, questions or decisions, and never read code, paths or ids aloud.`;
+Delegate before giving an answer that depends on backend work. Do not guess the result while waiting. When the backend reports it sent something, say "Sent." When it reports a staged request, read it back in one short sentence and ask "Send?" (or "Start?"), then wait; only say "Sent." or "Started." after the backend confirms. Thread updates are short notes: name the thread, lead with failures, questions or decisions, and never read code, paths or ids aloud.`;
 
 const DEFAULT_PROMPT = `You are the backend for Aide, a voice operator for bb — the user's agentic IDE where coding agents run in threads inside projects. A separate voice model talks to the user and delegates to you; your tools act on bb, and the voice model speaks whatever text you return.
 
@@ -618,6 +618,7 @@ Rules:
 - With no thread in view, route work to your own agent (delegate, when available) or start a thread; never do the work yourself.
 - Thread ids look like thr_x… and project ids like proj_x…. When the user names a thread by topic or title, find it with list_threads or search_threads first.
 - Never invent prompts, titles, or messages on the user's behalf: relay the user's own words. Ask a question only when you cannot act at all without the answer (for example, no thread or project in view and none named).
+- When the user explicitly asks to send it ("tell it …", "send this to the thread", "pass this along"), call send_to_thread with explicit: true and no thread_id; bb sends it at once and you return "Sent."
 - Prefer focus_thread so the user sees what you are talking about.
 - When reading agent output (read_thread, "what did it say?"), return a digest, not a one-liner and not a full readout: the few points worth the user's attention, in a handful of short sentences. Lead with whatever would surprise them or needs them: failures, unexpected findings, questions the agent asked, decisions it is waiting on, deviations from what was asked. Call those out explicitly ("worth a look:", "it's asking you to decide") so the user knows to read the full thread later, and keep the thread on screen with focus_thread. Skip routine detail.
 - Thread completions and progress updates are announced to the user by the voice model directly; never poll a thread to notice them.
@@ -664,7 +665,7 @@ const DELEGATE_PROMPT_SECTION = `\n\nYou also have a bb agent of your own: the d
 
 const UPDATES_PROMPT_SECTION = `\n\nWhen the user asks to be kept posted at a cadence (for example, "updates every minute" or "keep me posted every 30 seconds"), call schedule_updates with that interval and, as focus, what they care about in their own words. It defaults to the thread in view. bb then speaks a progress update to the user at each interval and stops automatically when that thread's agent finishes its turn. Use stop_updates when the user says "stop the updates" or "that's enough." Never poll with read_thread.`;
 
-const CONFIRM_PROMPT_SECTION = `\n\nRelaying work is always two steps. A call to send_to_thread, start_thread with a prompt, or delegate only stages the request; it does not send or start anything. After staging, return the request in one short sentence in the user's words and end with "Send?" (or "Start?" for a new thread), then stop. The user's answer arrives as a new delegation: if it is yes, call confirm_pending and return "Sent." or "Started."; if no, drop the request; if they change it, stage the corrected request and read it back again. Never call confirm_pending in the same response as staging. Silence is not a yes.`;
+const CONFIRM_PROMPT_SECTION = `\n\nRelaying work is two steps unless the user explicitly asked to send it to the thread in view (send_to_thread with explicit: true, sent at once). Otherwise a call to send_to_thread, start_thread with a prompt, or delegate only stages the request; it does not send or start anything. After staging, return the request in one short sentence in the user's words and end with "Send?" (or "Start?" for a new thread), then stop. The user's answer arrives as a new delegation: if it is yes, call confirm_pending and return "Sent." or "Started."; if no, drop the request; if they change it, stage the corrected request and read it back again. Never call confirm_pending in the same response as staging. A question or objection is not a yes: answer it, then ask again. Silence is not a yes.`;
 
 interface VoiceConfig {
   backendModel: BackendModel;
@@ -685,7 +686,7 @@ function liveSessionConfig(
     pluginCommands.length === 0
       ? ""
       : `\n\nInstalled bb plugins contribute extra commands you can run with run_plugin_command:\n${pluginCommands.map((c) => `- ${c.id}: bb ${c.name} — ${c.summary}`).join("\n")}\nWhen unsure of a plugin's subcommands, run it with argv ["--help"] first.`;
-  const contextLine = `\n\nCurrent context: threadId=${context.threadId ?? "none"}, projectId=${context.projectId ?? "none"}${context.onNewThreadScreen ? " — the user is on the New thread screen (no thread exists yet; they're composing the prompt for one)" : ""}. Call get_context for fresh context — the user navigates while talking.`;
+  const contextLine = `\n\nContext at call start: threadId=${context.threadId ?? "none"}, projectId=${context.projectId ?? "none"}. The user navigates while talking: for 'this thread', 'the thread', 'it', or when no thread is named, omit thread_id — bb targets the thread in view at that moment. Call get_context to read what is in view.${context.onNewThreadScreen ? " The user is on the New thread screen (no thread exists yet; they're composing the prompt for one)." : ""}`;
   const backendInstructions = `${prompt}${pluginSection}${config.delegate ? DELEGATE_PROMPT_SECTION : ""}${UPDATES_PROMPT_SECTION}${CONFIRM_PROMPT_SECTION}${contextLine}`;
   return {
     model: LIVE_MODEL,
@@ -1010,6 +1011,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (typeof value !== "string" || !value) throw new ToolRunError("bad_args", `Missing argument: ${key}`);
       return value;
     };
+    const threadArg = (): string =>
+      (typeof args.thread_id === "string" && args.thread_id) ||
+      context.threadId ||
+      (() => { throw new ToolRunError("bad_args", "No thread in view and none named — ask which thread."); })();
     switch (name) {
       case "get_context": {
         const result: Record<string, unknown> = { threadId: context.threadId, projectId: context.projectId };
@@ -1073,7 +1078,7 @@ export default async function plugin(bb: BbPluginApi) {
         return truncate(JSON.stringify(result), 6000);
       }
       case "read_thread": {
-        const threadId = str("thread_id");
+        const threadId = threadArg();
         const thread = await bb.sdk.threads.get({ threadId });
         const { output } = await bb.sdk.threads.output({ threadId });
         const [described] = await withMachines([describeThread(thread)]);
@@ -1147,12 +1152,12 @@ export default async function plugin(bb: BbPluginApi) {
       }
       case "set_pane": {
         const action = str("action") as "spotlight" | "clear-spotlight" | "maximize" | "restore" | "toggle";
-        const { delivered } = await bb.sdk.threads.paneAction({ threadId: str("thread_id"), action });
+        const { delivered } = await bb.sdk.threads.paneAction({ threadId: threadArg(), action });
         return delivered > 0 ? `Pane ${action} applied.` : "No connected bb window received the action.";
       }
       case "send_to_thread": {
         await bb.sdk.threads.send({
-          threadId: str("thread_id"),
+          threadId: threadArg(),
           mode: "auto",
           ...FULL_ACCESS,
           input: [{ type: "text", text: str("message"), mentions: [] }],
@@ -1202,15 +1207,15 @@ export default async function plugin(bb: BbPluginApi) {
         );
       }
       case "stop_thread": {
-        await bb.sdk.threads.stop({ threadId: str("thread_id") });
+        await bb.sdk.threads.stop({ threadId: threadArg() });
         return "Thread stopped.";
       }
       case "archive_thread": {
-        await bb.sdk.threads.archive({ threadId: str("thread_id") });
+        await bb.sdk.threads.archive({ threadId: threadArg() });
         return "Thread archived.";
       }
       case "rename_thread": {
-        await bb.sdk.threads.update({ threadId: str("thread_id"), title: str("title") });
+        await bb.sdk.threads.update({ threadId: threadArg(), title: str("title") });
         return "Thread renamed.";
       }
       case "run_plugin_command": {
@@ -1331,7 +1336,7 @@ export default async function plugin(bb: BbPluginApi) {
         return "Instructions updated. They apply from the next voice session.";
       }
       case "show_diff": {
-        const threadId = str("thread_id");
+        const threadId = threadArg();
         const environmentId = await resolveEnvironmentId(threadId);
         if (!environmentId) return "This thread has no environment, so there is no diff.";
         const environment = await bb.sdk.environments.get({ environmentId });

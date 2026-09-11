@@ -1,5 +1,11 @@
 export const CONFIRMED_TOOLS = new Set(["send_to_thread", "start_thread", "delegate"]);
 
+export function needsConfirmation(name: string, args: Record<string, unknown>, viewThreadId: string | null): boolean {
+  if (!CONFIRMED_TOOLS.has(name)) return false;
+  return !(name === "send_to_thread" && args.explicit === true &&
+    (!args.thread_id || args.thread_id === viewThreadId));
+}
+
 interface PendingCall {
   name: string;
   args: Record<string, unknown>;

@@ -8,12 +8,14 @@
 // The key is read from OPENAI_API_KEY and is never printed.
 
 const args = process.argv.slice(2);
-const flags = { bbUrl: "http://127.0.0.1:38886", tools: true, debug: false };
+const flags = { bbUrl: "http://127.0.0.1:38886", tools: true, debug: false, threadId: null, projectId: null };
 const words = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--bb-url") flags.bbUrl = args[++i];
   else if (args[i] === "--no-tools") flags.tools = false;
   else if (args[i] === "--debug") flags.debug = true;
+  else if (args[i] === "--thread") flags.threadId = args[++i];
+  else if (args[i] === "--project") flags.projectId = args[++i];
   else words.push(args[i]);
 }
 const message = words.join(" ").trim();
@@ -42,7 +44,7 @@ async function rpc(method, input) {
 let session;
 let localTools = new Set();
 try {
-  const config = await rpc("getSessionConfig", { threadId: null, projectId: null, onNewThreadScreen: false });
+  const config = await rpc("getSessionConfig", { threadId: flags.threadId, projectId: flags.projectId, onNewThreadScreen: false });
   session = config.session;
   const toolList = await rpc("getTools", null);
   localTools = new Set(toolList.tools.filter((tool) => tool.local).map((tool) => tool.name));
@@ -165,7 +167,7 @@ ws.addEventListener("message", async (event) => {
     let output;
     try {
       if (localTools.has(name)) output = "(frontend-only tool; not available in the text harness)";
-      else output = (await rpc("runTool", { name, args: JSON.parse(argumentText || "{}"), threadId: null, projectId: null })).output;
+      else output = (await rpc("runTool", { name, args: JSON.parse(argumentText || "{}"), threadId: flags.threadId, projectId: flags.projectId })).output;
     } catch (error) {
       output = `Tool error: ${error.message}`;
     }

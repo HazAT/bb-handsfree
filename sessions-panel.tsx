@@ -642,6 +642,7 @@ export function SessionsPanel() {
   // back. Everything else (thread focus, starting work, diffs) runs through rpc,
   // which works from anywhere.
   useEffect(() => {
+    voiceAgent.observeView({ threadId: threadId ?? null, projectId: projectId ?? null });
     voiceAgent.bindFallback({
       rpc,
       context: { threadId: threadId ?? null, projectId: projectId ?? null, onNewThreadScreen: false },

@@ -206,7 +206,7 @@ test("the Live session sends Responses delegation and returns its session id", a
   assert.equal(body.session.delegation.responses.parallel_tool_calls, false);
   assert.ok(body.session.delegation.responses.tools.some((tool: { name: string }) => tool.name === "delegate"));
   assert.match(body.session.delegation.responses.instructions, /When the user asks to be kept posted/);
-  assert.match(body.session.delegation.responses.instructions, /Relaying work is always two steps/);
+  assert.match(body.session.delegation.responses.instructions, /Relaying work is two steps unless/);
   assert.doesNotMatch(body.session.instructions, /get_context/);
   const config = await host.harness.callRpc("getSessionConfig", { threadId: null, projectId: PROJECT });
   assert.deepEqual(config, { session: body.session });
@@ -442,7 +442,7 @@ test("runTool records successful calls and classifies bad arguments and unknown 
     ...CONTEXT,
     sessionId: "call-telemetry",
   })) as { output: string };
-  assert.equal(invalid.output, "Tool error: Missing argument: thread_id");
+  assert.equal(invalid.output, "Tool error: No thread in view and none named — ask which thread.");
   const unknown = (await host.harness.callRpc("runTool", {
     name: "not_a_tool",
     args: {},

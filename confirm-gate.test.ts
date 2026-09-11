@@ -1,9 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CONFIRMED_TOOLS, ConfirmationGate } from "./confirm-gate.ts";
+import { CONFIRMED_TOOLS, ConfirmationGate, needsConfirmation } from "./confirm-gate.ts";
 
 test("only relay tools require confirmation", () => {
   assert.deepEqual([...CONFIRMED_TOOLS], ["send_to_thread", "start_thread", "delegate"]);
+});
+
+test("explicit relays to the viewed thread bypass confirmation", () => {
+  assert.equal(needsConfirmation("send_to_thread", { explicit: true }, "thr_view"), false);
+  assert.equal(needsConfirmation("send_to_thread", { explicit: true, thread_id: "thr_view" }, "thr_view"), false);
+  assert.equal(needsConfirmation("send_to_thread", { explicit: true, thread_id: "thr_other" }, "thr_view"), true);
+  assert.equal(needsConfirmation("send_to_thread", { thread_id: "thr_view" }, "thr_view"), true);
+  assert.equal(needsConfirmation("start_thread", { explicit: true }, "thr_view"), true);
+  assert.equal(needsConfirmation("delegate", { explicit: true }, "thr_view"), true);
 });
 
 test("take refuses when nothing is staged", () => {

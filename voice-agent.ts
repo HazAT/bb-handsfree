@@ -17,7 +17,7 @@ import {
 } from "./audio-devices.ts";
 import { clientId, realmId, identityTag, clientDescriptor, deviceSummary } from "./client-identity.ts";
 import { UpdateSchedule, type ActivityResult } from "./progress-updates.ts";
-import { CONFIRMED_TOOLS, ConfirmationGate } from "./confirm-gate.ts";
+import { CONFIRMED_TOOLS, ConfirmationGate, needsConfirmation } from "./confirm-gate.ts";
 
 export type VoiceState = "idle" | "connecting" | "live" | "muted";
 /** Who currently has the floor during a live call, for the "listening" UI. */
@@ -193,6 +193,7 @@ export class VoiceAgent {
   private session: SessionHandle | null = null;
   private listeners = new Set<() => void>();
   private bindings: Bindings | null = null;
+  private viewContext: { threadId: string | null; projectId: string | null } | null = null;
   private nonce: string | null = null;
   private storage = browserStorage();
   private audioPreferences: AudioDevicePreferences =
@@ -358,7 +359,12 @@ export class VoiceAgent {
 
   bind(bindings: Bindings) {
     this.bindings = bindings;
+    this.viewContext = bindings.context;
     this.helloOnce("composer");
+  }
+
+  observeView(view: { threadId: string | null; projectId: string | null }) {
+    if (this.viewContext === null || view.threadId !== this.viewContext.threadId) this.viewContext = view;
   }
 
   /**
@@ -1010,7 +1016,7 @@ export class VoiceAgent {
       this.log("tool.dropped", { name, reason: "session ended" });
       return;
     }
-    this.log("tool.call", { name, args });
+    this.log("tool.call", { name, args, view: this.viewContext });
     this.lastTool = { name, at: Date.now() };
     let output: string;
     if (!bindings) {
@@ -1064,8 +1070,12 @@ export class VoiceAgent {
       output =
         "Opened the New thread screen with the project preselected. The user will type the prompt themselves; no thread exists yet.";
     } else if (CONFIRMED_TOOLS.has(name)) {
-      output = this.confirmationGate.propose(name, args);
-      this.log("tool.staged", { name, args });
+      if (!needsConfirmation(name, args, this.viewContext?.threadId ?? bindings.context.threadId)) {
+        output = await this.runServerTool(name, args);
+      } else {
+        output = this.confirmationGate.propose(name, args);
+        this.log("tool.staged", { name, args });
+      }
     } else if (name === "confirm_pending") {
       const pending = this.confirmationGate.take();
       if (pending.ok) {
@@ -1114,7 +1124,7 @@ export class VoiceAgent {
       const result = await bindings.rpc.call("runTool", {
         name,
         args: suppressFocus ? { ...args, focus: false } : args,
-        ...bindings.context,
+        ...(this.viewContext ?? bindings.context),
         sessionId: this.nonce ?? undefined,
       });
       return result.output;
