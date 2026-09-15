@@ -580,8 +580,32 @@ test("the default prompt makes Aide an orchestrator that relays in-thread speech
   const { defaultContent } = (await host.harness.callRpc("getPrompt", null)) as { defaultContent: string };
   assert.match(defaultContent, /orchestrator, not a worker/);
   assert.match(defaultContent, /Default to relaying[\s\S]*send_to_thread/);
-  assert.match(defaultContent, /do not ask clarifying questions/);
-  assert.match(defaultContent, /With no thread in view, route work to your own agent/);
+  assert.match(defaultContent, /Relay faithfully/);
+  assert.match(defaultContent, /Ask a question back before relaying only when/);
+  assert.match(defaultContent, /no thread in view and the request is work in a project/);
+});
+
+test("start_thread runs in the project in view on its default machine and never asks which", async () => {
+  const { host, tools, spawns } = await load();
+  const startThread = (await tools()).find((tool) => tool.name === "start_thread");
+  assert.ok(startThread);
+  assert.match(startThread.description, /default machine/);
+  assert.match(startThread.description, /never ask which machine/);
+  const { defaultContent } = (await host.harness.callRpc("getPrompt", null)) as { defaultContent: string };
+  assert.match(defaultContent, /Never ask which machine to use/);
+  assert.doesNotMatch(defaultContent, /use list_machines and ask/);
+
+  const { output } = (await host.harness.callRpc("runTool", {
+    name: "start_thread",
+    args: { prompt: "add a retry to the uploader", focus: false },
+    ...CONTEXT,
+  })) as { output: string };
+  assert.equal(spawns().length, 1);
+  const [args] = spawns()[0];
+  assert.equal(args.projectId, PROJECT);
+  assert.deepEqual(args.environment, { type: "project-default" });
+  assert.equal(args.prompt, "add a retry to the uploader");
+  assert.equal(JSON.parse(output).started.projectId, PROJECT);
 });
 
 test("the assistant finishing is announced like any other thread, by its title", async () => {

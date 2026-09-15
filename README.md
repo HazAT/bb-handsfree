@@ -72,8 +72,9 @@ press the new combination.
   and follow-ups go to the same thread, so the agent keeps its context
 
 The agent always knows which thread and project you're looking at — even as
-you navigate mid-conversation — so "this thread" just works. If a project
-lives on several machines, it checks which and asks before starting work.
+you navigate mid-conversation — so "this thread" just works. New threads start
+in the project you're looking at, on its default machine; name a project or
+machine when you want a different one, and it never asks which machine to use.
 
 A voice session is shared across all your bb windows and devices: the sidebar
 shows a live voice bar (with which device the session came through), and any

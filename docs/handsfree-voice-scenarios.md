@@ -109,7 +109,12 @@ inferred the relay or found another thread by title or search. Starting a thread
 with a prompt and delegating work still require confirmation.
 
 - **Ideal:** explicit relays reach the thread on screen immediately; inferred
-  requests are read back and approved exactly before they run.
+  requests are read back and approved exactly before they run. What reaches the
+  agent is what you said: your wording, scope, and constraints, with fillers and
+  words aimed at Aide removed, nothing added and nothing summarized away. Aide
+  asks one short question back only when the request would be materially
+  incomplete without it, such as an ambiguous target or a "but don't…" that
+  trailed off, and folds the answer into the request before staging it.
 - **Under the hood:** `send_to_thread` omits `thread_id` for the thread in view,
   resolved from the fresh view context when the tool runs. Prompted
   `start_thread`, `delegate`, and inferred or named-thread relays stage their
@@ -119,6 +124,23 @@ with a prompt and delegating work still require confirmation.
   delegation only when exactly one new turn has happened since staging. Zero
   turns are refused; two or more expire and clear it; a corrected proposal
   replaces it. Ending the call clears it.
+
+## 11. Start a thread in the right place
+
+Say "start a thread: add retries to the uploader" while looking at a project
+that lives on two machines. Aide reads the prompt back, asks "Start?", and on
+yes starts it in that project on the project's default machine. It says
+"Started in Widgets." It never asks which machine.
+
+- **Ideal:** the thread runs where bb is configured to run it, so the agent sees
+  the right code and context; you name a project or machine only when you want a
+  different one.
+- **Under the hood:** `start_thread` resolves the project from the fresh view
+  context when the tool runs and spawns with bb's `project-default`
+  environment, which follows the project's default source. `machine_id` maps to
+  a host environment with a fresh managed worktree and is passed only when the
+  user named a machine, with `list_machines` used to find its id. The result
+  carries the started thread's project and machine, which is what Aide confirms.
 
 ## How a mis-classified navigating tool self-reports
 
